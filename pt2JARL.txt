@@ -1,0 +1,101 @@
+important info - hamer>config_hydra>experiment>hamer_vit_transformeer.yaml
+# @package _global_
+
+defaults:
+  - default.yaml
+
+GENERAL:
+  TOTAL_STEPS: 1_000_000
+  LOG_STEPS: 1000
+  VAL_STEPS: 1000
+  CHECKPOINT_STEPS: 1000
+  CHECKPOINT_SAVE_TOP_K: 1
+  NUM_WORKERS: 4
+  PREFETCH_FACTOR: 2
+
+TRAIN:
+  LR: 1e-5
+  WEIGHT_DECAY: 1e-4
+  BATCH_SIZE: 8
+  LOSS_REDUCTION: mean
+  NUM_TRAIN_SAMPLES: 2
+  NUM_TEST_SAMPLES: 64
+  POSE_2D_NOISE_RATIO: 0.01
+  SMPL_PARAM_NOISE_RATIO: 0.005
+
+MODEL:
+  IMAGE_SIZE: 256
+  IMAGE_MEAN: [0.485, 0.456, 0.406]
+  IMAGE_STD: [0.229, 0.224, 0.225]
+  BACKBONE:
+    TYPE: vit
+    PRETRAINED_WEIGHTS: hamer_training_data/vitpose_backbone.pth
+  MANO_HEAD:
+    TYPE: transformer_decoder
+    IN_CHANNELS: 2048
+    TRANSFORMER_DECODER:
+      depth: 6
+      heads: 8
+      mlp_dim: 1024
+      dim_head: 64
+      dropout: 0.0
+      emb_dropout: 0.0
+      norm: layer
+      context_dim: 1280 # from vitpose-H
+
+LOSS_WEIGHTS:
+  KEYPOINTS_3D: 0.05
+  KEYPOINTS_2D: 0.01
+  GLOBAL_ORIENT: 0.001
+  HAND_POSE: 0.001
+  BETAS: 0.0005
+  ADVERSARIAL: 0.0005
+
+
+datasets[dataset, image_dataset, json_dataset, mocap_dataset, utils, vitdet_dataset]
+models[[backbones[vit.py]][components[pose_transformers, t_cond_mlp]][heads[mano_head]]discriminator, hamer, losses, mano_wrapper]
+utils[download, geometry, mesh_renders, misc, pose_utils, pylogger, render_openpose, renderer, rich_utils, skeleton_renderer, utils_detectron2]
+
+prefers .format over f-string
+uses ViT (Vision Transformer) instead of CNN
+
+
+Vision Transformers (ViTs)
+Strengths:
+
+Global Attention: ViTs can capture long-range dependencies and global context more effectively by treating images as sequences of patches and using self-attention mechanisms.
+Scalability: ViTs offer scalability and flexibility that surpass CNNs, making them suitable for large datasets and complex tasks.
+Performance: ViTs have shown superior performance in diverse medical imaging tasks and have achieved state-of-the-art performance on several benchmark datasets.
+
+Weaknesses:
+
+Data Requirements: ViTs require larger datasets for effective training compared to CNNs.
+Computational Resources: ViTs demand significant computational resources for training, which can be a limiting factor in certain scenarios.
+Task Suitability: ViTs may not work as well for dense prediction tasks like segmentation without certain modifications.
+
+Convolutional Neural Networks (CNNs)
+Strengths:
+
+Local Feature Extraction: CNNs are better suited for tasks that require understanding local patterns and features in images.
+Efficiency: CNNs are more resource-friendly and typically train faster than ViTs.
+Reliability: CNNs have been around longer and are well-tested, making them a reliable choice for many applications.
+
+Weaknesses:
+
+Global Context: CNNs may struggle with tasks that require understanding context from distant parts of an image.
+Fixed Input Size: CNNs often require fixed input sizes, which can be a limitation for some applications.
+
+In summary, the choice between ViTs and CNNs should be driven by the specific use-case, available resources, and the nature of the data. ViTs are better for tasks requiring global context and have shown superior performance on large datasets, while CNNs are more efficient and better suited for tasks requiring local feature extraction.
+What specific task or application are you considering for your project? This can help determine which architecture might be more suitable for your needs.
+
+
+implementation here seem to be protected by copyright (no info on licence)
+base ViT is on Apache2.0 licence, links below
+https://github.com/open-mmlab/awesome-vit/blob/main/README.md
+https://roboflow.com/model/vision-transformer
+https://github.com/google-research/vision_transformer
+
+third party ViTPose is part of transformers model definition framework licenced Apache 2.0
+Transformers works with Python 3.9+ PyTorch 2.1+, TensorFlow 2.6+, and Flax 0.4.1+.
+https://github.com/huggingface/transformers/blob/v4.56.2/src/transformers/models/vitpose/image_processing_vitpose.py#L328
+https://huggingface.co/papers/2204.12484https://huggingface.co/papers/2204.12484
