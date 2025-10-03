@@ -29,13 +29,17 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade wheel setuptools
 
+# REVIEW: Numpy is installed separately because otherwise installation fails:
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "numpy>=1,<2"
+
+# Install opencv-python version compatible with NumPy 1.x
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "opencv-python<4.12.0.88"
+
 # Install torch and torchvision:
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu118
-
-# REVIEW: Numpy is installed separately because otherwise installation fails:
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install numpy
 
 # Install gdown (used for fetching scripts):
 RUN --mount=type=cache,target=/root/.cache/pip \
