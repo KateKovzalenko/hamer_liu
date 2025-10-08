@@ -2,8 +2,10 @@ ARG BASE=nvidia/cuda:12.6.2-devel-ubuntu22.04
 FROM ${BASE} AS hamer
 
 # Install OS dependencies:
-RUN apt-get update && apt-get upgrade -y
-RUN apt-get install -y --no-install-recommends --fix-missing \
+
+# Note: apt-get update refreshes package index so installs succeed, not to upgrade packages
+
+RUN apt-get update  && apt-get install -y --no-install-recommends --fix-missing \
     gcc g++ \
     make \
     python3 python3-dev python3-pip python3-venv python3-wheel \
@@ -43,15 +45,18 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Install gdown (used for fetching scripts):
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install gdown
-
-# Install third-party dependencies ViTPose:
-COPY third-party/ third-party/
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -v -e third-party/ViTPose
+    pip install "gdown==5.2.0"
 
 # Install project dependencies:
 COPY . .
+
 # Install hamer:
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e .[all]
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "Pillow<10"
+
+# Install third-party dependencies ViTPose:
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -v -e third-party/ViTPose
