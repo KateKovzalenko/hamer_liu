@@ -14,6 +14,7 @@ token_channel.csv
 /_DATA/
 /hamer_training_data/
 /outputs/
+.devcontainer/
 
 mano_v1_2/
 
