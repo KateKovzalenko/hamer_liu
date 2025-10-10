@@ -95,22 +95,36 @@ def main():
         bboxes = []
         is_right = []
 
-        # Use hands based on hand keypoint detections
+        # =========================================
+        # HAND DETECTION + DUPLICATE SUPPRESSION
+        # =========================================
         for vitposes in vitposes_out:
             left_hand_keyp = vitposes['keypoints'][-42:-21]
             right_hand_keyp = vitposes['keypoints'][-21:]
 
-            # Rejecting not confident detections
+            # ----- LEFT HAND -----
             keyp = left_hand_keyp
-            valid = keyp[:,2] > 0.5
+            valid = keyp[:, 2] > 0.5
             if sum(valid) > 3:
-                bbox = [keyp[valid,0].min(), keyp[valid,1].min(), keyp[valid,0].max(), keyp[valid,1].max()]
+                bbox = [
+                    keyp[valid, 0].min(),
+                    keyp[valid, 1].min(),
+                    keyp[valid, 0].max(),
+                    keyp[valid, 1].max(),
+                ]
                 bboxes.append(bbox)
                 is_right.append(0)
+
+            # ----- RIGHT HAND -----
             keyp = right_hand_keyp
-            valid = keyp[:,2] > 0.5
+            valid = keyp[:, 2] > 0.5
             if sum(valid) > 3:
-                bbox = [keyp[valid,0].min(), keyp[valid,1].min(), keyp[valid,0].max(), keyp[valid,1].max()]
+                bbox = [
+                    keyp[valid, 0].min(),
+                    keyp[valid, 1].min(),
+                    keyp[valid, 0].max(),
+                    keyp[valid, 1].max(),
+                ]
                 bboxes.append(bbox)
                 is_right.append(1)
 
@@ -119,6 +133,33 @@ def main():
 
         boxes = np.stack(bboxes)
         right = np.stack(is_right)
+
+        # Debug: check detected hands
+        print(f"Detected {len(bboxes)} hands: ", ['right' if r else 'left' for r in is_right])
+
+        # =========================================
+        # DUPLICATE-HAND FILTER (2D KEYPOINT BASED)
+        # =========================================
+        # Only run if exactly 2 boxes (common for single-hand images misdetected as both left/right)
+        if len(boxes) == 2:
+            left_kp = vitposes_out[0]['keypoints'][-42:-21]
+            right_kp = vitposes_out[0]['keypoints'][-21:]
+
+            valid_l = left_kp[:, 2] > 0.5
+            valid_r = right_kp[:, 2] > 0.5
+
+            # Only compare joints that are valid in BOTH hands
+            common_valid = valid_l & valid_r
+            if common_valid.sum() > 0:
+                dist = np.linalg.norm(left_kp[common_valid, :2] - right_kp[common_valid, :2], axis=1).mean()
+                if dist < 15:  # pixels threshold, tune 10–20 if needed
+                    # Keep only the hand with higher average confidence
+                    if right_kp[:, 2].mean() >= left_kp[:, 2].mean():
+                        boxes = boxes[right == 1]
+                        right = right[right == 1]
+                    else:
+                        boxes = boxes[right == 0]
+                        right = right[right == 0]
 
         # Run reconstruction on all detected hands
         dataset = ViTDetDataset(model_cfg, img_cv2, boxes, right, rescale_factor=args.rescale_factor)
