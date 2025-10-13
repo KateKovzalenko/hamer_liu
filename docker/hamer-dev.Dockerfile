@@ -2,8 +2,10 @@ ARG BASE=nvidia/cuda:12.6.2-devel-ubuntu22.04
 FROM ${BASE} AS hamer
 
 # Install OS dependencies:
-RUN apt-get update && apt-get upgrade -y
-RUN apt-get install -y --no-install-recommends --fix-missing \
+
+# Note: apt-get update refreshes package index so installs succeed, not to upgrade packages
+
+RUN apt-get update  && apt-get install -y --no-install-recommends --fix-missing \
     gcc g++ \
     make \
     python3 python3-dev python3-pip python3-venv python3-wheel \
@@ -29,25 +31,32 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade wheel setuptools
 
+# REVIEW: Numpy is installed separately because otherwise installation fails:
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "numpy>=1,<2"
+
+# Install opencv-python version compatible with NumPy 1.x
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "opencv-python<4.12.0.88"
+
 # Install torch and torchvision:
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu118
 
-# REVIEW: Numpy is installed separately because otherwise installation fails:
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install numpy
-
 # Install gdown (used for fetching scripts):
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install gdown
-
-# Install third-party dependencies ViTPose:
-COPY third-party/ third-party/
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -v -e third-party/ViTPose
+    pip install "gdown==5.2.0"
 
 # Install project dependencies:
 COPY . .
+
 # Install hamer:
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e .[all]
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "Pillow<10"
+
+# Install third-party dependencies ViTPose:
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -v -e third-party/ViTPose
