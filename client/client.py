@@ -1,0 +1,140 @@
+import argparse
+import requests
+import matplotlib.pyplot as plt
+from PIL import Image
+import io
+import os
+import json
+
+# -----------------------------------------------------
+# Configuration
+# -----------------------------------------------------
+DEFAULT_HOST = "localhost"
+DEFAULT_PORT = "8080"
+
+
+def send_image(image_path, api_url):
+    """Send an image file to the /upload/image endpoint."""
+    with open(image_path, 'rb') as f:
+        files = {'file': (os.path.basename(image_path), f, 'image/jpeg')}
+        print(f"Sending image to {api_url} ...")
+        response = requests.post(api_url, files=files, timeout=30)
+    response.raise_for_status()
+    return response.json(), open(image_path, 'rb').read()
+
+
+def send_video(video_path, api_url):
+    """Send a video file to the /upload/video endpoint."""
+    with open(video_path, 'rb') as f:
+        files = {'file': (os.path.basename(video_path), f, 'video/mp4')}
+        print(f"Sending video to {api_url} ...")
+        response = requests.post(api_url, files=files, timeout=60)
+    response.raise_for_status()
+    return response.json(), None
+
+
+def send_path(path, api_url):
+    """Send a JSON payload to the /process/path endpoint."""
+    payload = {"path": path}
+    print(f" Sending JSON payload to {api_url}: {payload}")
+    response = requests.post(api_url, json=payload, timeout=30)
+    response.raise_for_status()
+    return response.json(), None
+
+
+def plot_vertices(image_bytes, vertices):
+    """Plot hand tracking landmarks on the input image."""
+    img = Image.open(io.BytesIO(image_bytes))
+    img_width, img_height = img.size
+
+    _, ax = plt.subplots(1)
+    ax.imshow(img)
+
+    for v in vertices:
+        x = v['x'] * img_width
+        y = v['y'] * img_height
+        ax.plot(x, y, 'ro', markersize=3)
+
+    plt.axis('off')
+    plt.title("Hand Tracking Results")
+    plt.show()
+
+
+# -----------------------------------------------------
+# Main CLI
+# -----------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Client for Hand Tracking API (auto mode)")
+    parser.add_argument(
+        "--input",
+        required=True,
+        help="Path to input file or directory."
+    )
+    parser.add_argument(
+        "--host",
+        default=DEFAULT_HOST,
+        help="HOST of the running Flask API."
+    )
+    parser.add_argument(
+        "--port",
+        default=DEFAULT_PORT,
+        help="PORT of the running Flask API."
+    )
+
+    args = parser.parse_args()
+
+    print(f"Using API at {args.host}:{args.port}")
+
+    input_path = args.input
+    base_url = f"http://{args.host}:{args.port}"
+
+    try:
+        if not os.path.exists(input_path):
+            raise FileNotFoundError(f"Input path does not exist: {input_path}")
+
+        # --- Decide mode automatically ---
+        if os.path.isdir(input_path):
+            mode = "path"
+            api_url = f"{base_url}/process/path"
+            data, img_bytes = send_path(input_path, api_url)
+
+        elif os.path.isfile(input_path):
+            ext = os.path.splitext(input_path)[1].lower()
+            if ext in [".jpg", ".jpeg", ".png"]:
+                mode = "image"
+                api_url = f"{base_url}/upload/image"
+                data, img_bytes = send_image(input_path, api_url)
+            elif ext in [".mp4", ".avi", ".mov", ".mkv"]:
+                mode = "video"
+                api_url = f"{base_url}/upload/video"
+                data, img_bytes = send_video(input_path, api_url)
+            else:
+                raise ValueError(f"Unsupported file type: {ext}")
+
+        else:
+            raise ValueError(f"Invalid input: {input_path}")
+
+        # --- Handle response ---
+        print(" Response received:")
+        print(json.dumps(data, indent=2))
+
+        vertices = data.get("vertices", [])
+        if mode == "image" and vertices:
+            plot_vertices(img_bytes, vertices)
+        elif not vertices:
+            print(" No hand vertices detected.")
+
+    except requests.exceptions.RequestException as e:
+        print(f" Request failed: {e}")
+    except json.JSONDecodeError as e:
+        print(f" JSON decode error: {e}")
+    except FileNotFoundError as e:
+        print(f" Input error: {e}")
+    except ValueError as e:
+        print(f" File type error: {e}")
+    except OSError as e:
+        print(f" OS error: {e}")
+
+
+if __name__ == "__main__":
+    main()

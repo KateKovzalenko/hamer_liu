@@ -90,3 +90,52 @@ python demo.py \
 ```
 
 Because the `docker-compose.yml` file mounts the local directory (`../:/app` relative to the compose file, which is the project root), the `demo_out` folder will appear on your host machine's `hamer/demo_out` directory.
+
+
+**Temporary**
+
+> This section is temporary.  
+
+Contains instructions for running the Docker file for hand tracking server, located in the docker folder.  
+
+Future plans:  
+- Merge Docker files to run both Hand Tracking and Hamer in a single container.  
+- Add Hamer processing.  
+- After integrating Hamer to hand tracking, remove code related to MediaPipe.
+
+
+cd ..\hamer
+
+**Build the Docker Image**
+
+docker build -t handtracking-image:latest -f docker/hand_tracking_server.Dockerfile .
+
+**Run the Docker Container**
+
+docker run -d -p 8080:5000 --name handtracking-container handtracking-image:latest
+
+**Test the Application**
+
+You have two ways to test your running API:
+
+### 1\. Using the Web Browser (GUI)
+
+1.  Open your favorite web browser (like Chrome, Firefox, or Edge).
+2.  Navigate to the following URL: **[http://localhost:8080](https://www.google.com/search?q=http://localhost:8080)**
+3.  You should see a simple webpage with an "Upload an Image" form.
+4.  Use the form to upload your image to see the JSON results.
+
+### 2\. Using the Python Client Script
+
+This method provides a visual confirmation by plotting the results on the image.
+
+1.  **Install Client Dependencies**: In your terminal, install the required Python libraries for the client script.
+    ```powershell
+    pip install requests matplotlib Pillow
+    ```
+2.  **Run the Client**: Execute the `client.py` script.
+    ```powershell
+    python client/client.py --input "path"
+    ```
+
+If successful, a new window will pop up showing your sample image with the detected hand landmarks plotted as red dots.
