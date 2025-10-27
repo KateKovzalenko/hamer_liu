@@ -1,129 +1,92 @@
-# HaMeR: Hand Mesh Recovery
-Code repository for the paper:
-**Reconstructing Hands in 3D with Transformers**
+# HaMeR-LiU: Hand Mesh tracking
 
-[Georgios Pavlakos](https://geopavlakos.github.io/), [Dandan Shan](https://ddshan.github.io/), [Ilija Radosavovic](https://people.eecs.berkeley.edu/~ilija/), [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/), [David Fouhey](https://cs.nyu.edu/~fouhey/), [Jitendra Malik](http://people.eecs.berkeley.edu/~malik/)
+## Adaption of the HAMER repository.
 
-[![arXiv](https://img.shields.io/badge/arXiv-2312.05251-00ff00.svg)](https://arxiv.org/pdf/2312.05251.pdf)  [![Website shields.io](https://img.shields.io/website-up-down-green-red/http/shields.io.svg)](https://geopavlakos.github.io/hamer/)     [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1rQbQzegFWGVOm1n1d-S6koOWDo7F2ucu?usp=sharing)  [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/geopavlakos/HaMeR)
+For more information about the original readme.md, refers to the **[Original README.DM](./docs/README_original.md)** file.
 
-![teaser](assets/teaser.jpg)
+## Docker Installation
 
-## News
+This procedure details setting up and running the HaMeR project using Docker and the NVIDIA Container Toolkit. This is the **recommended method** as it provides a reproducible, isolated environment that resolves all complex Python dependency conflicts (e.g., numpy, opencv, xtcocotools).
 
-- [2024/06] HaMeR received the 2nd place award in the Ego-Pose Hands task of the Ego-Exo4D Challenge! Please check the [validation report](https://www.cs.utexas.edu/~pavlakos/hamer/resources/egoexo4d_challenge.pdf).
-- [2024/05] We have released the evaluation pipeline!
-- [2024/05] We have released the HInt dataset annotations! Please check [here](https://github.com/ddshan/hint).
-- [2023/12] Original release!
+These instructions are tailored for **Windows 11 (Home/Pro)** with an **NVIDIA GPU**.
 
-## Installation
-First you need to clone the repo:
-```
+### 1\. Host System Prerequisites (Windows 11)
+
+Your host system must be configured to provide GPU access to Docker containers.
+
+**Install NVIDIA Drivers:** Ensure you have the latest NVIDIA Game Ready or Studio Drivers installed for your GPU.
+
+**Install/Enable WSL 2:** Docker Desktop on Windows requires the Windows Subsystem for Linux (WSL) 2 for GPU passthrough. Windows 11 Home editions fully support this.
+
+  * Open PowerShell as Administrator and run:
+    ```bash
+    wsl --install
+    ```
+  * Reboot your system if prompted.
+
+**Install Docker Desktop:**
+
+  * Download and install Docker Desktop for Windows.
+  * During setup, ensure it is configured to use the "WSL 2 based engine." This is the default.
+  * After installation, navigate to **Settings \> Resources \> WSL Integration** and ensure "Enable integration with my default WSL distro" is checked.
+
+### 2\. Project & Asset Setup
+
+**Clone the Repository:** Clone the `hamer` repository, including its submodules (like ViTPose).
+
+```bash
 git clone --recursive https://github.com/geopavlakos/hamer.git
 cd hamer
 ```
 
-We recommend creating a virtual environment for HaMeR. You can use venv:
+**Download MANO Model:** The MANO model is required but cannot be redistributed due to its license.
+
+  * Visit the [MANO website](https://mano.is.tue.mpg.de/) and register to access the downloads section.
+  * Download the right hand model (`MANO_RIGHT.pkl`).
+  * Create the required data directory structure and place the file there. The final path on your host machine must be:
+    `hamer/_DATA/data/mano/MANO_RIGHT.pkl`
+
+### 3\. Build and Launch the Container
+
+The provided Docker configuration will build the environment with all pinned dependencies (PyTorch, CUDA 11.8, correct NumPy/OpenCV versions).
+
+**Build the Image:** From the root `hamer` directory, run the following command. This will take up to one hour as it builds the `Dockerfile` specified in `docker/docker-compose.yml`.
+
 ```bash
-python3.10 -m venv .hamer
-source .hamer/bin/activate
+docker compose -f ./docker/docker-compose.yml up -d --build
 ```
 
-or alternatively conda:
+  * `--build`: Forces a new build of the image.
+  * `-d`: Runs the container in detached (background) mode.
+
+**Verify Container is Running:** Check that the `hamer-dev` container is running.
+
 ```bash
-conda create --name hamer python=3.10
-conda activate hamer
+docker ps
 ```
 
-Then, you can install the rest of the dependencies. This is for CUDA 11.7, but you can adapt accordingly:
+You should see an entry for `hamer-dev`.
+
+### 4\. Running the Demo
+
+**Enter the Container:** Access the running container's shell.
+
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu117
-pip install -e .[all]
-pip install -v -e third-party/ViTPose
-```
-
-You also need to download the trained models:
-```bash
-bash fetch_demo_data.sh
-```
-
-Besides these files, you also need to download the MANO model. Please visit the [MANO website](https://mano.is.tue.mpg.de) and register to get access to the downloads section.  We only require the right hand model. You need to put `MANO_RIGHT.pkl` under the `_DATA/data/mano` folder.
-
-### Docker Compose
-
-If you wish to use HaMeR with Docker, you can use the following command:
-
-```
-docker compose -f ./docker/docker-compose.yml up -d
-```
-
-After the image is built successfully, enter the container and run the steps as above:
-
-```
 docker compose -f ./docker/docker-compose.yml exec hamer-dev /bin/bash
 ```
 
-Continue with the installation steps:
+**Fetch Demo Data:** Once inside the container, download the pre-trained HaMeR models.
 
 ```bash
 bash fetch_demo_data.sh
 ```
 
-## Demo
-```bash
+**Run the Demo:** Execute the demo script on the example data.
+
+```python
 python demo.py \
     --img_folder example_data --out_folder demo_out \
     --batch_size=48 --side_view --save_mesh --full_frame
 ```
 
-## HInt Dataset
-We have released the annotations for the HInt dataset. Please follow the instructions [here](https://github.com/ddshan/hint)
-
-## Training
-First, download the training data to `./hamer_training_data/` by running:
-```
-bash fetch_training_data.sh
-```
-
-Then you can start training using the following command:
-```
-python train.py exp_name=hamer data=mix_all experiment=hamer_vit_transformer trainer=gpu launcher=local
-```
-Checkpoints and logs will be saved to `./logs/`.
-
-## Evaluation
-Download the [evaluation metadata](https://www.dropbox.com/scl/fi/7ip2vnnu355e2kqbyn1bc/hamer_evaluation_data.tar.gz?rlkey=nb4x10uc8mj2qlfq934t5mdlh) to `./hamer_evaluation_data/`. Additionally, download the FreiHAND, HO-3D, and HInt dataset images and update the corresponding paths in  `hamer/configs/datasets_eval.yaml`.
-
-Run evaluation on multiple datasets as follows, results are stored in `results/eval_regression.csv`. 
-```bash
-python eval.py --dataset 'FREIHAND-VAL,HO3D-VAL,NEWDAYS-TEST-ALL,NEWDAYS-TEST-VIS,NEWDAYS-TEST-OCC,EPICK-TEST-ALL,EPICK-TEST-VIS,EPICK-TEST-OCC,EGO4D-TEST-ALL,EGO4D-TEST-VIS,EGO4D-TEST-OCC'
-```
-
-Results for HInt are stored in `results/eval_regression.csv`. For [FreiHAND](https://github.com/lmb-freiburg/freihand) and [HO-3D](https://codalab.lisn.upsaclay.fr/competitions/4318) you get as output a `.json` file that can be used for evaluation using their corresponding evaluation processes.
-
-## Acknowledgements
-Parts of the code are taken or adapted from the following repos:
-- [4DHumans](https://github.com/shubham-goel/4D-Humans)
-- [SLAHMR](https://github.com/vye16/slahmr)
-- [ProHMR](https://github.com/nkolot/ProHMR)
-- [SPIN](https://github.com/nkolot/SPIN)
-- [SMPLify-X](https://github.com/vchoutas/smplify-x)
-- [HMR](https://github.com/akanazawa/hmr)
-- [ViTPose](https://github.com/ViTAE-Transformer/ViTPose)
-- [Detectron2](https://github.com/facebookresearch/detectron2)
-
-Additionally, we thank [StabilityAI](https://stability.ai/) for a generous compute grant that enabled this work.
-
-## Open-Source Contributions
-- [Wentao Hu](https://vincenthu19.github.io/) integrated the hand parameters predicted by HaMeR into SMPL-X - [Mano2Smpl-X](https://github.com/VincentHu19/Mano2Smpl-X)
-
-## Citing
-If you find this code useful for your research, please consider citing the following paper:
-
-```bibtex
-@inproceedings{pavlakos2024reconstructing,
-    title={Reconstructing Hands in 3{D} with Transformers},
-    author={Pavlakos, Georgios and Shan, Dandan and Radosavovic, Ilija and Kanazawa, Angjoo and Fouhey, David and Malik, Jitendra},
-    booktitle={CVPR},
-    year={2024}
-}
-```
+Because the `docker-compose.yml` file mounts the local directory (`../:/app` relative to the compose file, which is the project root), the `demo_out` folder will appear on your host machine's `hamer/demo_out` directory.
