@@ -174,5 +174,3 @@ This method provides a visual confirmation by plotting the results on the image.
     ```powershell
     python client/client.py --input "path"
     ```
-
-If successful, a new window will pop up showing your sample image with the detected hand landmarks plotted as red dots.
