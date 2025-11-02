@@ -125,7 +125,6 @@ I downloaded with the link
 https://drive.google.com/uc?id=1mv7CUAnm73oKsEEG1xE3xH2C_oqcFSzT
 
 
-
 > This section is temporary.  
 
 Contains instructions for running the Docker file for hand tracking server, located in the docker folder.  
@@ -177,11 +176,3 @@ This method provides a visual confirmation by plotting the results on the image.
     ```
 
 If successful, a new window will pop up showing your sample image with the detected hand landmarks plotted as red dots.
-
-
-
-docker build -t docker-hamer-server -f docker/docker_hamer_server.Dockerfile .
-docker run --gpus all -v ${PWD}:/app -it --rm -p 8080:5000 --name docker-hamer-server  docker-hamer-server:latest
-python -m server.server
-
-python client/client.py --input "C:\Users\kovza\Desktop\Data Science Professional Portrait.png"
