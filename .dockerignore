@@ -11,3 +11,6 @@ _DATA/
 # the MANO_RIGHT.pkl file inside:
 *.zip
 mano_v1_2/
+
+# Ignoring folders:
+client/

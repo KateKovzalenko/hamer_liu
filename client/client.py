@@ -1,10 +1,13 @@
 import argparse
 import requests
+import base64
 import matplotlib.pyplot as plt
 from PIL import Image
 import io
+from io import BytesIO
 import os
 import json
+from datetime import datetime
 
 # -----------------------------------------------------
 # Configuration
@@ -12,15 +15,58 @@ import json
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = "8080"
 
-
 def send_image(image_path, api_url):
-    """Send an image file to the /upload/image endpoint."""
+    """Send an image file to the /upload/image endpoint and show/save the rendered result."""
+
+    # --- Ensure output folder exists ---
+    output_dir = "demo_out"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # --- Upload image ---
     with open(image_path, 'rb') as f:
         files = {'file': (os.path.basename(image_path), f, 'image/jpeg')}
         print(f"Sending image to {api_url} ...")
         response = requests.post(api_url, files=files, timeout=30)
     response.raise_for_status()
-    return response.json(), open(image_path, 'rb').read()
+
+    result = response.json()
+
+    # --- Save full JSON response with unique timestamp ---
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_filename = os.path.join(output_dir, f"full_output_{timestamp}.json")
+    with open(json_filename, "w") as f:
+        json.dump(result, f, indent=2)
+    print(f"✅ Full response saved to {json_filename}")
+
+    # --- Handle hands rendered images ---
+    if "hands" in result and result["hands"]:
+        images = []
+        for hand in result["hands"]:
+            if "rendered_image_base64" in hand:
+                img_data = base64.b64decode(hand["rendered_image_base64"])
+                images.append(Image.open(BytesIO(img_data)))
+
+        if images:
+            # Combine images horizontally (side by side)
+            widths, heights = zip(*(img.size for img in images))
+            total_width = sum(widths)
+            max_height = max(heights)
+            combined = Image.new("RGB", (total_width, max_height))
+            x_offset = 0
+            for img in images:
+                combined.paste(img, (x_offset, 0))
+                x_offset += img.width
+
+            image_filename = os.path.join(output_dir, f"all_hands_output_{timestamp}.png")
+            combined.show(title="HAMER Output")
+            combined.save(image_filename)
+            print(f"Rendered image(s) saved as {image_filename}")
+        else:
+            print("No rendered images found, but vertices exist.")
+    else:
+        print("No rendered image found in response. Got vertices only.")
+
+    return result
 
 
 def send_video(video_path, api_url):
@@ -103,7 +149,9 @@ def main():
             if ext in [".jpg", ".jpeg", ".png"]:
                 mode = "image"
                 api_url = f"{base_url}/upload/image"
-                data, img_bytes = send_image(input_path, api_url)
+                data = send_image(input_path, api_url)
+                img_bytes = None
+                #data, img_bytes = send_image(input_path, api_url)
             elif ext in [".mp4", ".avi", ".mov", ".mkv"]:
                 mode = "video"
                 api_url = f"{base_url}/upload/video"

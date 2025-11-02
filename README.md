@@ -91,28 +91,63 @@ python demo.py \
 
 Because the `docker-compose.yml` file mounts the local directory (`../:/app` relative to the compose file, which is the project root), the `demo_out` folder will appear on your host machine's `hamer/demo_out` directory.
 
-
+______________________________________________________________________________
 **Temporary**
+
+From the beginning
+
+ Project & Asset Setup
+
+**Clone the Repository:** Clone the `hamer` repository, including its submodules (like ViTPose).
+
+```bash
+git clone --recursive https://github.com/geopavlakos/hamer.git
+cd hamer
+
+
+**Download MANO Model:**
+
+The MANO model is required but cannot be redistributed due to its license.
+
+  * Visit the [MANO website](https://mano.is.tue.mpg.de/) and register to access the downloads section.
+  * Download the right hand model (`MANO_RIGHT.pkl`).
+  * Create the required data directory structure and place the file there. The final path on your host machine must be:
+    `hamer/_DATA/data/mano/MANO_RIGHT.pkl`
+
+
+**Fetch Demo Data:** Once inside the container, download the pre-trained HaMeR models.
+
+```bash
+bash fetch_demo_data.sh
+
+I downloaded with the link
+
+https://drive.google.com/uc?id=1mv7CUAnm73oKsEEG1xE3xH2C_oqcFSzT
+
+
 
 > This section is temporary.  
 
 Contains instructions for running the Docker file for hand tracking server, located in the docker folder.  
 
 Future plans:  
-- Merge Docker files to run both Hand Tracking and Hamer in a single container.  
 - Add Hamer processing.  
 - After integrating Hamer to hand tracking, remove code related to MediaPipe.
-
 
 cd ..\hamer
 
 **Build the Docker Image**
 
-docker build -t handtracking-image:latest -f docker/hand_tracking_server.Dockerfile .
+docker build -t docker-hamer-server -f docker/docker_hamer_server.Dockerfile .
 
 **Run the Docker Container**
 
-docker run -d -p 8080:5000 --name handtracking-container handtracking-image:latest
+docker run --gpus all -v ${PWD}:/app -it --rm -p 8080:5000 --name docker-hamer-server  docker-hamer-server:latest
+
+**Run in the Terminal**
+
+python -m server.server
+
 
 **Test the Application**
 
@@ -134,8 +169,19 @@ This method provides a visual confirmation by plotting the results on the image.
     pip install requests matplotlib Pillow
     ```
 2.  **Run the Client**: Execute the `client.py` script.
+
+  Make sure the folder HAMER/demo_out exists before running the command. (Create it)
+
     ```powershell
     python client/client.py --input "path"
     ```
 
 If successful, a new window will pop up showing your sample image with the detected hand landmarks plotted as red dots.
+
+
+
+docker build -t docker-hamer-server -f docker/docker_hamer_server.Dockerfile .
+docker run --gpus all -v ${PWD}:/app -it --rm -p 8080:5000 --name docker-hamer-server  docker-hamer-server:latest
+python -m server.server
+
+python client/client.py --input "C:\Users\kovza\Desktop\Data Science Professional Portrait.png"
