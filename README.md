@@ -114,17 +114,6 @@ The MANO model is required but cannot be redistributed due to its license.
   * Create the required data directory structure and place the file there. The final path on your host machine must be:
     `hamer/_DATA/data/mano/MANO_RIGHT.pkl`
 
-
-**Fetch Demo Data:** Once inside the container, download the pre-trained HaMeR models.
-
-```bash
-bash fetch_demo_data.sh
-
-I downloaded with the link
-
-https://drive.google.com/uc?id=1mv7CUAnm73oKsEEG1xE3xH2C_oqcFSzT
-
-
 > This section is temporary.  
 
 Contains instructions for running the Docker file for hand tracking server, located in the docker folder.  
@@ -133,7 +122,13 @@ Future plans:
 - Add Hamer processing.  
 - After integrating Hamer to hand tracking, remove code related to MediaPipe.
 
-cd ..\hamer
+Temporary Notice:
+Until dev-ht-24-interface changes are merged into the dev branch, please use this branch to get the latest hand tracking integration updates.
+
+# Switch to our temporary development branch
+git fetch origin dev-ht-24-interface
+git checkout dev-ht-24-interface
+git pull origin dev-ht-24-interface
 
 **Build the Docker Image**
 
@@ -168,8 +163,6 @@ This method provides a visual confirmation by plotting the results on the image.
     pip install requests matplotlib Pillow
     ```
 2.  **Run the Client**: Execute the `client.py` script.
-
-  Make sure the folder HAMER/demo_out exists before running the command. (Create it)
 
     ```powershell
     python client/client.py --input "path"
