@@ -1,3 +1,5 @@
+import os
+import tempfile
 import torch
 import cv2
 import numpy as np
@@ -25,6 +27,7 @@ class HamerProcessor(BaseProcessor):
 
         # Download & load model
         download_models(CACHE_DIR_HAMER)
+            
         self.model, self.model_cfg = load_hamer(DEFAULT_CHECKPOINT)
         self.model = self.model.to(self.device)
         self.model.eval()
@@ -109,7 +112,7 @@ class HamerProcessor(BaseProcessor):
 
         # --- Step 3: Run HaMeR model ---
         dataset = ViTDetDataset(self.model_cfg, img_cv2, boxes, right)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0)
 
         all_results = {"hands": []}
 
@@ -159,8 +162,32 @@ class HamerProcessor(BaseProcessor):
                     "rendered_image_base64": rendered_b64,
                 }
             )
-
         return all_results
+    
+    def _process_video(self, file_path):
+        """Process video file by sampling every Nth frame."""
+        cap = cv2.VideoCapture(file_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {file_path}")
+
+        frame_count = 0
+        sampled_results = []
+        sample_rate = 10  # process every 10th frame
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_count += 1
+
+            if frame_count % sample_rate == 0:
+                sampled_results.append(self._process_image_np(frame))
+
+        cap.release()
+        return {
+            "frames_processed": len(sampled_results),
+            "samples": sampled_results
+        }
 
     # -------------------------
     # Flask interface methods
@@ -173,5 +200,19 @@ class HamerProcessor(BaseProcessor):
         return self._process_image_np(image_np)
 
     def process_video_file(self, file):
-        """Optional video support (not yet implemented)."""
-        return {"error": "Video processing not implemented for HaMeR yet."}
+        """
+        Process an uploaded video file-like object (from Flask).
+        Saves the uploaded file temporarily and calls _process_video.
+        """
+
+        # Save uploaded file to a temp location
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            tmp.write(file.read())
+            tmp_path = tmp.name
+
+        try:
+            result = self._process_video(tmp_path)
+        finally:
+            os.remove(tmp_path)
+
+        return result

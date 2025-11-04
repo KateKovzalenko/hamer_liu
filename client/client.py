@@ -26,7 +26,7 @@ def send_image(image_path, api_url):
     with open(image_path, 'rb') as f:
         files = {'file': (os.path.basename(image_path), f, 'image/jpeg')}
         print(f"Sending image to {api_url} ...")
-        response = requests.post(api_url, files=files, timeout=30)
+        response = requests.post(api_url, files=files, timeout=(10, 600)) # 10s connect timeout, 600s read timeout (10 minutes)
     response.raise_for_status()
 
     result = response.json()
@@ -36,7 +36,7 @@ def send_image(image_path, api_url):
     json_filename = os.path.join(output_dir, f"full_output_{timestamp}.json")
     with open(json_filename, "w") as f:
         json.dump(result, f, indent=2)
-    print(f"✅ Full response saved to {json_filename}")
+    print(f"Full response saved to {json_filename}")
 
     # --- Handle hands rendered images ---
     if "hands" in result and result["hands"]:
@@ -77,16 +77,6 @@ def send_video(video_path, api_url):
         response = requests.post(api_url, files=files, timeout=60)
     response.raise_for_status()
     return response.json(), None
-
-
-def send_path(path, api_url):
-    """Send a JSON payload to the /process/path endpoint."""
-    payload = {"path": path}
-    print(f" Sending JSON payload to {api_url}: {payload}")
-    response = requests.post(api_url, json=payload, timeout=30)
-    response.raise_for_status()
-    return response.json(), None
-
 
 def plot_vertices(image_bytes, vertices):
     """Plot hand tracking landmarks on the input image."""
@@ -139,12 +129,7 @@ def main():
             raise FileNotFoundError(f"Input path does not exist: {input_path}")
 
         # --- Decide mode automatically ---
-        if os.path.isdir(input_path):
-            mode = "path"
-            api_url = f"{base_url}/process/path"
-            data, img_bytes = send_path(input_path, api_url)
-
-        elif os.path.isfile(input_path):
+        if os.path.isfile(input_path):
             ext = os.path.splitext(input_path)[1].lower()
             if ext in [".jpg", ".jpeg", ".png"]:
                 mode = "image"
@@ -155,7 +140,7 @@ def main():
             elif ext in [".mp4", ".avi", ".mov", ".mkv"]:
                 mode = "video"
                 api_url = f"{base_url}/upload/video"
-                data, img_bytes = send_video(input_path, api_url)
+                data = send_video(input_path, api_url)
             else:
                 raise ValueError(f"Unsupported file type: {ext}")
 
@@ -166,11 +151,8 @@ def main():
         print(" Response received:")
         print(json.dumps(data, indent=2))
 
-        vertices = data.get("vertices", [])
-        if mode == "image" and vertices:
-            plot_vertices(img_bytes, vertices)
-        elif not vertices:
-            print(" No hand vertices detected.")
+        hands = data.get("hands", [])
+        # TODO: Output received base64 image.       
 
     except requests.exceptions.RequestException as e:
         print(f" Request failed: {e}")
