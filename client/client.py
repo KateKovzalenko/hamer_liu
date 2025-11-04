@@ -70,13 +70,71 @@ def send_image(image_path, api_url):
 
 
 def send_video(video_path, api_url):
-    """Send a video file to the /upload/video endpoint."""
+    """Send a video file to the /upload/video endpoint, save JSON, and show first frame render if available."""
+
+    # Ensure output folder exists
+    output_dir = "demo_out"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Upload video
     with open(video_path, 'rb') as f:
         files = {'file': (os.path.basename(video_path), f, 'video/mp4')}
         print(f"Sending video to {api_url} ...")
-        response = requests.post(api_url, files=files, timeout=60)
-    response.raise_for_status()
-    return response.json(), None
+        response = requests.post(api_url, files=files, timeout=(10, 3600))  # 1 hour read timeout
+
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        print("Request failed:", e)
+        print("Response text:", response.text)
+        return None
+
+    # Parse JSON result
+    result = response.json()
+
+    # Save full JSON with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_filename = os.path.join(output_dir, f"video_output_{timestamp}.json")
+    with open(json_filename, "w") as f:
+        json.dump(result, f, indent=2)
+    print(f"Full response saved to {json_filename}")
+
+    # Show first frame rendered image (if exists)
+    first_frame = result['samples'][0] if result.get('samples') else None
+    if first_frame and "hands" in first_frame:
+        images = []
+        for hand in first_frame["hands"]:
+            if "rendered_image_base64" in hand:
+                img_data = base64.b64decode(hand["rendered_image_base64"])
+                images.append(Image.open(BytesIO(img_data)))
+
+        if images:
+            # Combine horizontally if multiple hands
+            widths, heights = zip(*(img.size for img in images))
+            total_width = sum(widths)
+            max_height = max(heights)
+            combined = Image.new("RGB", (total_width, max_height))
+            x_offset = 0
+            for img in images:
+                combined.paste(img, (x_offset, 0))
+                x_offset += img.width
+
+            combined.show(title="First frame render")
+            image_filename = os.path.join(output_dir, f"first_frame_{timestamp}.png")
+            combined.save(image_filename)
+            print(f"Rendered first frame saved as {image_filename}")
+        else:
+            print("No rendered images in first frame, but vertices may exist.")
+    else:
+        print("No hands found in first frame or no samples returned.")
+
+    # Optional: print summary of frames with vertices only
+    total_frames = len(result.get('samples', []))
+    print(f"Total frames processed: {total_frames}")
+    frames_with_vertices = sum(1 for f in result.get('samples', []) if "hands" in f)
+    print(f"Frames containing hand vertices: {frames_with_vertices}")
+
+    return result
 
 def plot_vertices(image_bytes, vertices):
     """Plot hand tracking landmarks on the input image."""
@@ -150,9 +208,6 @@ def main():
         # --- Handle response ---
         print(" Response received:")
         print(json.dumps(data, indent=2))
-
-        hands = data.get("hands", [])
-        # TODO: Output received base64 image.       
 
     except requests.exceptions.RequestException as e:
         print(f" Request failed: {e}")

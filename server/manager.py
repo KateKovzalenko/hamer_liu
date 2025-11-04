@@ -41,7 +41,15 @@ class Manager:
             file = request.files.get('file')
             if not file:
                 return jsonify({"error": "No file uploaded"}), 400
-            return jsonify(self.hamer_processor.process_video_file(file))
+            try:
+                result = self.hamer_processor.process_video_file(file)
+            except Exception as e:
+                import traceback
+                tb_str = traceback.format_exc()
+                print(tb_str)  # Prints full traceback in server logs
+                return jsonify({"error": str(e), "traceback": tb_str}), 500
+            return jsonify(result)
+            #return jsonify(self.hamer_processor.process_video_file(file))
             
     def run(self):
         self.app.run(host=self.host, port=self.port)

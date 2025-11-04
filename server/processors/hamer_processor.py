@@ -164,30 +164,138 @@ class HamerProcessor(BaseProcessor):
             )
         return all_results
     
-    def _process_video(self, file_path):
-        """Process video file by sampling every Nth frame."""
+    def _process_video(self, file_path, sample_rate=100):
+        """
+        Process video file by sampling frames.
+        - First frame: full hand processing with rendered image.
+        - Subsequent frames: vertices + camera translation only.
+        """
         cap = cv2.VideoCapture(file_path)
         if not cap.isOpened():
             raise ValueError(f"Could not open video: {file_path}")
 
         frame_count = 0
         sampled_results = []
-        sample_rate = 10  # process every 10th frame
 
         while True:
             ret, frame = cap.read()
             if not ret:
-                break
+                break  # exit if no more frames
             frame_count += 1
 
+            # Always process the first frame
+            if frame_count == 1:
+                full_result = self._process_image_np(frame)
+                sampled_results.append(full_result)
+                continue
+
+            # Sample other frames at given interval
             if frame_count % sample_rate == 0:
-                sampled_results.append(self._process_image_np(frame))
+                try:
+                    # Run same processing as _process_image_np, but skip rendering
+                    img_cv2 = frame.copy()
+                    img_rgb = img_cv2[:, :, ::-1]
+
+                    # Detect humans
+                    det_out = self.detector(img_cv2)
+                    det_instances = det_out["instances"]
+                    valid_idx = (det_instances.pred_classes == 0) & (det_instances.scores > 0.5)
+                    if valid_idx.sum() == 0:
+                        sampled_results.append({"error": "No person detected"})
+                        continue
+
+                    pred_bboxes = det_instances.pred_boxes.tensor[valid_idx].cpu().numpy()
+                    pred_scores = det_instances.scores[valid_idx].cpu().numpy()
+
+                    # Keypoints
+                    vitposes_out = self.vitpose.predict_pose(
+                        img_rgb, [np.concatenate([pred_bboxes, pred_scores[:, None]], axis=1)]
+                    )
+
+                    bboxes, is_right = [], []
+                    for vitposes in vitposes_out:
+                        left_hand_keyp = vitposes["keypoints"][-42:-21]
+                        right_hand_keyp = vitposes["keypoints"][-21:]
+
+                        # Left hand
+                        valid = left_hand_keyp[:, 2] > 0.5
+                        if valid.sum() > 3:
+                            bbox = [
+                                left_hand_keyp[valid, 0].min(),
+                                left_hand_keyp[valid, 1].min(),
+                                left_hand_keyp[valid, 0].max(),
+                                left_hand_keyp[valid, 1].max(),
+                            ]
+                            bboxes.append(bbox)
+                            is_right.append(0)
+
+                        # Right hand
+                        valid = right_hand_keyp[:, 2] > 0.5
+                        if valid.sum() > 3:
+                            bbox = [
+                                right_hand_keyp[valid, 0].min(),
+                                right_hand_keyp[valid, 1].min(),
+                                right_hand_keyp[valid, 0].max(),
+                                right_hand_keyp[valid, 1].max(),
+                            ]
+                            bboxes.append(bbox)
+                            is_right.append(1)
+
+                    if not bboxes:
+                        sampled_results.append({"error": "No hands detected"})
+                        continue
+
+                    boxes = np.stack(bboxes)
+                    right = np.stack(is_right)
+
+                    dataset = ViTDetDataset(self.model_cfg, img_cv2, boxes, right)
+                    dataloader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0)
+
+                    frame_results = {"hands": []}
+                    for batch in dataloader:
+                        batch = recursive_to(batch, self.device)
+                        with torch.no_grad():
+                            out = self.model(batch)
+
+                        pred_cam = out["pred_cam"]
+                        multiplier = (2 * batch["right"] - 1)
+                        pred_cam[:, 1] = multiplier * pred_cam[:, 1]
+
+                        box_center = batch["box_center"].float()
+                        box_size = batch["box_size"].float()
+                        img_size = batch["img_size"].float()
+                        scaled_focal_length = (
+                            self.model_cfg.EXTRA.FOCAL_LENGTH / self.model_cfg.MODEL.IMAGE_SIZE * img_size.max()
+                        )
+
+                        pred_cam_t_full = cam_crop_to_full(
+                            pred_cam, box_center, box_size, img_size, scaled_focal_length
+                        ).detach().cpu().numpy()
+
+                        verts = out["pred_vertices"][0].detach().cpu().numpy()
+                        cam_t = pred_cam_t_full[0]
+                        is_r = bool(batch["right"][0].cpu().numpy())
+
+                        # For video frames after first, skip rendering
+                        frame_results["hands"].append(
+                            {
+                                "is_right": is_r,
+                                "vertices": verts.tolist(),
+                                "camera_translation": cam_t.tolist(),
+                            }
+                        )
+
+                    sampled_results.append(frame_results)
+
+                except Exception as e:
+                    sampled_results.append({"error": str(e)})
 
         cap.release()
         return {
             "frames_processed": len(sampled_results),
             "samples": sampled_results
         }
+
 
     # -------------------------
     # Flask interface methods
