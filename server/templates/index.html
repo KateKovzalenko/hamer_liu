@@ -3,13 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <title>Hand Tracking API</title>
-    <style>
-        body { font-family: sans-serif; margin: 2em; }
-    </style>
+    <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
     <h1>Upload an Image for Hand Tracking</h1>
+    
     <form action="/upload/image" method="post" enctype="multipart/form-data">
+    	<label for="image">Browse for image:</label><br><br>
+        <input type="file" name="file">
+        <input type="submit" value="Upload & Process">
+    </form>
+    
+    <form action="/upload/video" method="post" enctype="multipart/form-data">
+    	<label for="image">Browse for video:</label><br><br>
         <input type="file" name="file">
         <input type="submit" value="Upload & Process">
     </form>
