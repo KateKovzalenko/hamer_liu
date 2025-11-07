@@ -44,6 +44,11 @@ RUN pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.py
 RUN pip install "opencv-contrib-python==4.11.0.86"
 RUN pip install "mediapipe==0.10.7"
 
+# ------------------------------------------------------------
+# Install VS Code debugger (debugpy)
+# ------------------------------------------------------------
+RUN pip install debugpy
+
 COPY . .
 
 # ------------------------------------------------------------

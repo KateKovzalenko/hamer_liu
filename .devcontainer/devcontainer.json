@@ -1,0 +1,32 @@
+{
+  "name": "HaMeR Dev Container",
+  "build": {
+    "dockerfile": "../docker/docker_hamer_server.Dockerfile",
+    "context": ".."
+  },
+  "runArgs": ["--gpus", "all"],
+  "workspaceFolder": "/app",
+  "remoteUser": "root",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ],
+      "settings": {
+        "python.pythonPath": "/opt/venv/bin/python",
+        "python.languageServer": "Pylance",
+        "python.testing.unittestEnabled": true,
+        "python.testing.pytestEnabled": true,
+        "python.testing.nosetestsEnabled": false
+      }
+    }
+  },
+  "forwardPorts": [5000, 5678],
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/app,type=bind,consistency=cached"
+  ],
+  "containerEnv": {
+    "PYTHONUNBUFFERED": "1"
+  }
+}
