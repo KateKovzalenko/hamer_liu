@@ -2,11 +2,9 @@
   "name": "HaMeR Dev Container",
   "build": {
     "dockerfile": "../docker/docker_hamer_server.Dockerfile",
-    "context": "..",
-    "args": {
-      "BASE": "nvidia/cuda:12.6.2-devel-ubuntu22.04"
-    }
+    "context": ".."
   },
+  "runArgs": ["--gpus", "all"],
   "workspaceFolder": "/app",
   "remoteUser": "root",
   "customizations": {
