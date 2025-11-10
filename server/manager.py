@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 
 class Manager:
-    def __init__(self, host="0.0.0.0", port=5000):
+    def __init__(self, host="0.0.0.0", port=8080):
         self.host = host
         self.port = port
         self.app = Flask(__name__)

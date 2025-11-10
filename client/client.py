@@ -64,7 +64,7 @@ def send_image(image_path, api_url):
         else:
             print("No rendered images found, but vertices exist.")
     else:
-        print("No rendered image found in response. Got vertices only.")
+        print("No rendered image found in response.")
 
     return result
 
@@ -207,7 +207,7 @@ def main():
 
         # --- Handle response ---
         print(" Response received:")
-        print(json.dumps(data, indent=2))
+        #print(json.dumps(data, indent=2))
 
     except requests.exceptions.RequestException as e:
         print(f" Request failed: {e}")

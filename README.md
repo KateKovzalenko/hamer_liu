@@ -140,7 +140,7 @@ docker run --gpus all -v ${PWD}:/app -it --rm -p 8080:5000 --name docker-hamer-s
 
 **Run in the Terminal**
 
-python -m server.server
+python -m server.server_main
 
 
 **Test the Application**
