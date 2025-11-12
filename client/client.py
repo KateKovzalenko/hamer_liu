@@ -17,37 +17,41 @@ DEFAULT_PORT = "8080"
 
 def send_image(image_path, api_url):
     """Send an image file to the /upload/image endpoint and show/save the rendered result."""
-
-    # --- Ensure output folder exists ---
     output_dir = "demo_out"
     os.makedirs(output_dir, exist_ok=True)
 
-    # --- Upload image ---
     with open(image_path, 'rb') as f:
         files = {'file': (os.path.basename(image_path), f, 'image/jpeg')}
         print(f"Sending image to {api_url} ...")
-        response = requests.post(api_url, files=files, timeout=(10, 600)) # 10s connect timeout, 600s read timeout (10 minutes)
+        response = requests.post(api_url, files=files, timeout=(10, 600))
     response.raise_for_status()
-
     result = response.json()
 
-    # --- Save full JSON response with unique timestamp ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     json_filename = os.path.join(output_dir, f"full_output_{timestamp}.json")
     with open(json_filename, "w") as f:
         json.dump(result, f, indent=2)
     print(f"Full response saved to {json_filename}")
 
-    # --- Handle hands rendered images ---
-    if "hands" in result and result["hands"]:
+    # Prefer single full-frame image if present
+    full_b64 = result.get("full_frame_rendered_image_base64")
+    if full_b64:
+        img_data = base64.b64decode(full_b64)
+        img = Image.open(BytesIO(img_data))
+        image_filename = os.path.join(output_dir, f"full_frame_{timestamp}.png")
+        img.show(title="HAMER Full Frame")
+        img.save(image_filename)
+        print(f"Full-frame rendered image saved as {image_filename}")
+    else:
+        # backward-compatible: per-hand rendered images inside hands[]
         images = []
-        for hand in result["hands"]:
-            if "rendered_image_base64" in hand:
-                img_data = base64.b64decode(hand["rendered_image_base64"])
-                images.append(Image.open(BytesIO(img_data)))
+        if "hands" in result and result["hands"]:
+            for hand in result["hands"]:
+                if "rendered_image_base64" in hand:
+                    img_data = base64.b64decode(hand["rendered_image_base64"])
+                    images.append(Image.open(BytesIO(img_data)))
 
         if images:
-            # Combine images horizontally (side by side)
             widths, heights = zip(*(img.size for img in images))
             total_width = sum(widths)
             max_height = max(heights)
@@ -58,29 +62,24 @@ def send_image(image_path, api_url):
                 x_offset += img.width
 
             image_filename = os.path.join(output_dir, f"all_hands_output_{timestamp}.png")
-            combined.show(title="HAMER Output")
+            combined.show(title="HAMER Hands")
             combined.save(image_filename)
-            print(f"Rendered image(s) saved as {image_filename}")
+            print(f"Rendered per-hand image(s) saved as {image_filename}")
         else:
-            print("No rendered images found, but vertices exist.")
-    else:
-        print("No rendered image found in response.")
+            print(f"No rendered image found. Hands detected: {len(result.get('hands', []))}")
 
     return result
 
 
 def send_video(video_path, api_url):
-    """Send a video file to the /upload/video endpoint, save JSON, and show first frame render if available."""
-
-    # Ensure output folder exists
+    """Send a video file to the /upload/video endpoint, save JSON, and show top-level render if available."""
     output_dir = "demo_out"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Upload video
     with open(video_path, 'rb') as f:
         files = {'file': (os.path.basename(video_path), f, 'video/mp4')}
         print(f"Sending video to {api_url} ...")
-        response = requests.post(api_url, files=files, timeout=(10, 3600))  # 1 hour read timeout
+        response = requests.post(api_url, files=files, timeout=(10, 3600))
 
     try:
         response.raise_for_status()
@@ -89,27 +88,33 @@ def send_video(video_path, api_url):
         print("Response text:", response.text)
         return None
 
-    # Parse JSON result
     result = response.json()
-
-    # Save full JSON with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     json_filename = os.path.join(output_dir, f"video_output_{timestamp}.json")
     with open(json_filename, "w") as f:
         json.dump(result, f, indent=2)
     print(f"Full response saved to {json_filename}")
 
-    # Show first frame rendered image (if exists)
-    first_frame = result['samples'][0] if result.get('samples') else None
-    if first_frame and "hands" in first_frame:
+    # Prefer top-level full-frame image if present
+    full_b64 = result.get("full_frame_rendered_image_base64")
+    if full_b64:
+        img_data = base64.b64decode(full_b64)
+        img = Image.open(BytesIO(img_data))
+        image_filename = os.path.join(output_dir, f"video_full_frame_{timestamp}.png")
+        img.show(title="HAMER Video Full Frame")
+        img.save(image_filename)
+        print(f"Full-frame rendered image saved as {image_filename}")
+    else:
+        # fallback: check first sample for per-hand rendered images (backwards compatibility)
+        first_sample = result.get("samples", [None])[0]
         images = []
-        for hand in first_frame["hands"]:
-            if "rendered_image_base64" in hand:
-                img_data = base64.b64decode(hand["rendered_image_base64"])
-                images.append(Image.open(BytesIO(img_data)))
+        if first_sample and "hands" in first_sample:
+            for hand in first_sample["hands"]:
+                if "rendered_image_base64" in hand:
+                    img_data = base64.b64decode(hand["rendered_image_base64"])
+                    images.append(Image.open(BytesIO(img_data)))
 
         if images:
-            # Combine horizontally if multiple hands
             widths, heights = zip(*(img.size for img in images))
             total_width = sum(widths)
             max_height = max(heights)
@@ -124,35 +129,14 @@ def send_video(video_path, api_url):
             combined.save(image_filename)
             print(f"Rendered first frame saved as {image_filename}")
         else:
-            print("No rendered images in first frame, but vertices may exist.")
-    else:
-        print("No hands found in first frame or no samples returned.")
+            print("No rendered images available. Samples returned:", len(result.get("samples", [])))
 
-    # Optional: print summary of frames with vertices only
     total_frames = len(result.get('samples', []))
     print(f"Total frames processed: {total_frames}")
-    frames_with_vertices = sum(1 for f in result.get('samples', []) if "hands" in f)
+    frames_with_vertices = sum(1 for f in result.get('samples', []) if "hands" in f and f["hands"])
     print(f"Frames containing hand vertices: {frames_with_vertices}")
 
     return result
-
-def plot_vertices(image_bytes, vertices):
-    """Plot hand tracking landmarks on the input image."""
-    img = Image.open(io.BytesIO(image_bytes))
-    img_width, img_height = img.size
-
-    _, ax = plt.subplots(1)
-    ax.imshow(img)
-
-    for v in vertices:
-        x = v['x'] * img_width
-        y = v['y'] * img_height
-        ax.plot(x, y, 'ro', markersize=3)
-
-    plt.axis('off')
-    plt.title("Hand Tracking Results")
-    plt.show()
-
 
 # -----------------------------------------------------
 # Main CLI
@@ -193,8 +177,6 @@ def main():
                 mode = "image"
                 api_url = f"{base_url}/upload/image"
                 data = send_image(input_path, api_url)
-                img_bytes = None
-                #data, img_bytes = send_image(input_path, api_url)
             elif ext in [".mp4", ".avi", ".mov", ".mkv"]:
                 mode = "video"
                 api_url = f"{base_url}/upload/video"
@@ -207,7 +189,7 @@ def main():
 
         # --- Handle response ---
         print(" Response received:")
-        #print(json.dumps(data, indent=2))
+        print(json.dumps(data, indent=2))
 
     except requests.exceptions.RequestException as e:
         print(f" Request failed: {e}")
