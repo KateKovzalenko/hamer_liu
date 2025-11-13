@@ -164,6 +164,7 @@ def extract_3d_vertices(data, is_video, *, apply_camera_translation: bool = Fals
                     if isinstance(translation, (list, tuple)) and len(translation) == 3:
                         try:
                             tx, ty, tz = translation
+                            tz = tz/10
                             translated_vertices = [
                                 [v[0] + tx, v[1] + ty, v[2] + tz] for v in vertices
                             ]
@@ -307,7 +308,7 @@ def main():
         # --- Tier 2: Data Extraction ---
         # This tier extracts data from the raw 'data' dict for plotting
         images_to_display, display_title = extract_rendered_images(data, is_video)
-        vertex_data = extract_3d_vertices(data, is_video, apply_camera_translation=False)
+        vertex_data = extract_3d_vertices(data, is_video, apply_camera_translation=True)
 
         # --- Tier 3: Visualization ---
         # This tier plots data from Tier 2
