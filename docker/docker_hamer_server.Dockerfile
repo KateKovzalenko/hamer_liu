@@ -45,6 +45,11 @@ RUN pip install "opencv-contrib-python==4.11.0.86"
 RUN pip install "mediapipe==0.10.7"
 
 # ------------------------------------------------------------
+# Install Jupyter and matplotlib (for interactive plotting)
+# ------------------------------------------------------------
+RUN pip install jupyter matplotlib ipython
+
+# ------------------------------------------------------------
 # Install VS Code debugger (debugpy)
 # ------------------------------------------------------------
 RUN pip install debugpy
@@ -73,4 +78,4 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Expose server port and run server
 # ------------------------------------------------------------
 EXPOSE 5000
-#CMD ["python", "-m", "server.server"]
+#CMD ["python", "-m", "server.server_main"]

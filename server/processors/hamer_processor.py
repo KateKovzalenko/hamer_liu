@@ -1,11 +1,14 @@
 import os
 import tempfile
+from IPython import embed
 import torch
 import cv2
 import numpy as np
 import base64
 from pathlib import Path
 from typing import Dict, Any
+import urllib.request
+from ..utils_debug import save_img
 
 from .base_processor import BaseProcessor
 
@@ -18,6 +21,60 @@ from hamer.utils.utils_detectron2 import DefaultPredictor_Lazy
 
 from vitpose_model import ViTPoseModel
 
+FINAL_MODEL = CACHE_DIR_HAMER + "/model_final_f05665.pkl"
+
+ASSETS = [
+    DEFAULT_CHECKPOINT,
+    FINAL_MODEL
+]
+
+def _assets_ready(cache_dir: Path) -> bool:
+    sentinel = cache_dir / ".assets_ready"
+    if sentinel.exists():
+        return True
+    if not all(Path(asset).exists() for asset in ASSETS):
+        return False
+    # create sentinel if all expected files present
+    sentinel.touch()
+    return True
+
+def _remove_tar_gz_files(cache_dir: str | Path) -> int:
+    """
+    Remove top-level .tar.gz files in cache_dir (non-recursive).
+    Returns number of files removed.
+    """
+    cache_dir = Path(cache_dir)
+    if not cache_dir.is_dir():
+        return 0
+    removed = 0
+    for p in cache_dir.iterdir():  # non-recursive
+        if p.is_file() and p.name.endswith(".tar.gz"):
+            try:
+                p.unlink()
+                removed += 1
+            except Exception:
+                # ignore failures or log if desired
+                pass
+    return removed
+
+def ensure_hamer_assets() -> None:
+    cache_dir = Path(CACHE_DIR_HAMER)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if _assets_ready(cache_dir):
+        return
+
+    MODEL_URL = (
+        "https://dl.fbaipublicfiles.com/detectron2/ViTDet/COCO/"
+        "cascade_mask_rcnn_vitdet_h/f328730692/model_final_f05665.pkl"
+    )
+    print("Downloading final model for ViTDet human detector...")
+    urllib.request.urlretrieve(MODEL_URL, FINAL_MODEL)
+
+    print("Downloading HaMeR model and assets...")
+    download_models(str(cache_dir))
+    # create sentinel if download produced expected files
+    _assets_ready(cache_dir)
+    _remove_tar_gz_files(cache_dir)
 
 class HamerProcessor(BaseProcessor):
     """Processor implementation using HaMeR 3D Hand Mesh Reconstruction."""
@@ -27,6 +84,7 @@ class HamerProcessor(BaseProcessor):
 
         # Download & load model
         download_models(CACHE_DIR_HAMER)
+        ensure_hamer_assets()
             
         self.model, self.model_cfg = load_hamer(DEFAULT_CHECKPOINT)
         self.model = self.model.to(self.device)
@@ -37,10 +95,7 @@ class HamerProcessor(BaseProcessor):
         import hamer
         cfg_path = Path(hamer.__file__).parent / "configs" / "cascade_mask_rcnn_vitdet_h_75ep.py"
         detectron2_cfg = LazyConfig.load(str(cfg_path))
-        detectron2_cfg.train.init_checkpoint = (
-            "https://dl.fbaipublicfiles.com/detectron2/ViTDet/COCO/"
-            "cascade_mask_rcnn_vitdet_h/f328730692/model_final_f05665.pkl"
-        )
+        detectron2_cfg.train.init_checkpoint = FINAL_MODEL
         for i in range(3):
             detectron2_cfg.model.roi_heads.box_predictors[i].test_score_thresh = 0.25
         self.detector = DefaultPredictor_Lazy(detectron2_cfg)
