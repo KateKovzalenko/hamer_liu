@@ -23,7 +23,7 @@
       }
     }
   },
-  "forwardPorts": [8080, 5678],
+  "forwardPorts": [5000, 5678],
   "mounts": [
     "source=${localWorkspaceFolder},target=/app,type=bind,consistency=cached"
   ],
