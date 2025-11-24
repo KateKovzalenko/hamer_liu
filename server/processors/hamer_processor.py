@@ -106,6 +106,82 @@ class HamerProcessor(BaseProcessor):
         self.renderer = Renderer(self.model_cfg, faces=self.model.mano.faces)
         self.LIGHT_BLUE = (0.65, 0.74, 0.86)
 
+    """def _project_vertices_to_pixels(self, vertices, cam_t, focal_length, img_res):
+        
+        Converts 3D vertices from camera coordinates to 2D image pixels.
+        vertices: Nx3 numpy array in camera coords
+        cam_t: 3-element translation vector
+        focal_length: scalar
+        img_res: tuple (width, height)
+    
+        vertices = vertices + cam_t[None, :]  # add camera translation
+        x = vertices[:, 0].cpu()
+        y = vertices[:, 1].cpu()
+        z = vertices[:, 2].cpu() + 1e-8  # avoid divide by zero
+
+        u = focal_length * (x / z) + img_res[0] / 2  #project to pixel u
+        v = focal_length * (y / z) + img_res[1] / 2  #project to pixel v
+
+        pixels = np.stack([u, v], axis=-1)
+        return pixels  # return pixel coordinates"""""
+    
+    def _project_vertices_to_pixels(
+        self,
+        vertices: torch.Tensor,          # (N, 3)
+        cam_t,                           # (3,) can be numpy or torch
+        focal_length: float,
+        img_res: tuple[int, int]         # (W, H)
+    ) -> np.ndarray:
+        """
+        Convert HaMeR 3D verts (mm space) into pixel space (u, v, z_px).
+        
+        Returns:
+            np.ndarray (N, 3): [u_px, v_px, z_px]
+        """
+
+         # ---------------------------
+        # 0) Make focal_length safe
+        # ---------------------------  # ← NEW
+        if isinstance(focal_length, torch.Tensor):
+            focal_length = float(focal_length.detach().cpu())
+
+        # ---------------------------
+        # 1) Move vertices to CPU
+        # --------------------------- 
+        verts_cpu = vertices.detach().cpu()
+
+        # ---------------------------
+        # 2) Handle cam_t safely (numpy OR torch)
+        # ---------------------------
+        if isinstance(cam_t, np.ndarray):
+            cam_t_np = cam_t
+        else:
+            cam_t_np = cam_t.detach().cpu().numpy()
+
+        tx, ty, tz = cam_t_np
+
+        # ---------------------------
+        # 3) Apply camera translation
+        # --------------------------- 
+        X = verts_cpu[:, 0] + tx
+        Y = -(verts_cpu[:, 1] + ty)
+        Z = verts_cpu[:, 2] + tz + 1e-8   # avoid divide-by-zero
+
+        W, H = img_res
+
+        # ---------------------------
+        # 4) Perspective projection
+        # ---------------------------  
+        u = focal_length * (X / Z) + (W / 2)
+        v = focal_length * (Y / Z) + (H / 2)
+
+        # ---------------------------
+        # 5) final pixel-space XYZ
+        # ---------------------------
+        verts_px = torch.stack([u, v, Z], dim=1).numpy()
+
+        return verts_px
+
     # -------------------------
     # Internal processing logic
     # -------------------------
@@ -169,7 +245,6 @@ class HamerProcessor(BaseProcessor):
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0)
 
         all_results = {"hands": []}
-        # Collect lists for final full-frame rendering
         all_verts_list = []
         all_cam_t_list = []
         all_right_list = []
@@ -194,40 +269,44 @@ class HamerProcessor(BaseProcessor):
                 pred_cam, box_center, box_size, img_size, scaled_focal_length
             ).detach().cpu().numpy()
 
-            # iterate over batch dimension to collect all hands
             batch_size = pred_cam.shape[0]
             for n in range(batch_size):
-                verts_n = out["pred_vertices"][n].detach().cpu().numpy()
-                is_r_n = int(batch["right"][n].cpu().numpy())
-                # flip X for handedness (same as demo)
+                verts_n = out["pred_vertices"][n]  # CUDA tensor
+                # Right hand: keep X
+                # Left hand: flip X
+                is_r_n = int(batch["right"][n].detach().item())
                 verts_n[:, 0] = (2 * is_r_n - 1) * verts_n[:, 0]
                 cam_t_n = pred_cam_t_full[n]
- 
-                all_results["hands"].append(
-                    {
-                        "is_right": bool(is_r_n),
-                        "vertices": verts_n.tolist(),
-                        "camera_translation": cam_t_n.tolist(),
-                    }
+                img_res = (img_cv2.shape[1], img_cv2.shape[0])
+
+                # --- Convert vertices to pixel coordinates ---
+                verts_pixels = self._project_vertices_to_pixels(
+                    vertices=verts_n,  # CUDA tensor
+                    cam_t=cam_t_n,     # NumPy array OK
+                    focal_length=scaled_focal_length,
+                    img_res=img_res
                 )
- 
-                all_verts_list.append(verts_n)
-                all_cam_t_list.append(cam_t_n)
+
+                all_results["hands"].append({
+                    "is_right": bool(is_r_n),
+                    "vertices": verts_pixels.tolist(),  # pixel coordinates
+                    "camera_translation": cam_t_n.tolist(),
+                })
+
+                all_verts_list.append(verts_n.detach().cpu().numpy())  # convert for renderer
+                all_cam_t_list.append(cam_t_n.copy())
                 all_right_list.append(is_r_n)
-        
-        # Single full-frame render (one image per uploaded image)
-        if len(all_verts_list) > 0:
-            # prefer renderer.render_rgba_multiple if available
+
+        # --- Step 4: Render full-frame image ---
+        if all_verts_list:
             render_fn = getattr(self.renderer, "render_rgba_multiple", None)
-            # choose render resolution from the input image
             h_full, w_full = img_cv2.shape[:2]
             render_res_hw = (int(w_full), int(h_full))
-            # compute a full-frame scaled focal length (use max side like demo)
             scaled_focal_length_full = (
                 self.model_cfg.EXTRA.FOCAL_LENGTH / self.model_cfg.MODEL.IMAGE_SIZE * max(h_full, w_full)
             )
- 
-            if render_fn is not None:
+
+            if render_fn:
                 rendered_combined = render_fn(
                     all_verts_list,
                     cam_t=all_cam_t_list,
@@ -238,42 +317,39 @@ class HamerProcessor(BaseProcessor):
                     scene_bg_color=(1, 1, 1),
                 )
             else:
-                # fallback: try to render each mesh into full-frame and alpha-composite manually
-                # use renderer callable that renders crops; this fallback may produce suboptimal results
+                # fallback: manual rendering
                 renders = []
                 for verts_n, cam_t_n in zip(all_verts_list, all_cam_t_list):
                     try:
-                        r = self.renderer(verts_n, cam_t_n, img_cv2, mesh_base_color=self.LIGHT_BLUE, scene_bg_color=(1,1,1))
+                        r = self.renderer(
+                            verts_n, cam_t_n, img_cv2,
+                            mesh_base_color=self.LIGHT_BLUE,
+                            scene_bg_color=(1, 1, 1)
+                        )
                         renders.append(r)
                     except Exception:
                         renders.append(np.zeros((h_full, w_full, 4), dtype=np.float32))
-                # sum/composite renders (simple over operator)
                 rendered_combined = np.zeros((h_full, w_full, 4), dtype=np.float32)
                 for r in renders:
-                    r_float = r.astype(np.float32)
-                    alpha = r_float[..., 3:4]
+                    alpha = r[..., 3:4].astype(np.float32)
                     if alpha.max() > 1.5:
-                        alpha = alpha / 255.0
-                    rendered_combined[..., :3] = rendered_combined[..., :3] * (1 - alpha) + r_float[..., :3] * alpha
+                        alpha /= 255.0
+                    rendered_combined[..., :3] = rendered_combined[..., :3] * (1 - alpha) + r[..., :3] * alpha
                     rendered_combined[..., 3:4] = np.clip(rendered_combined[..., 3:4] + alpha, 0, 1)
 
-            # Ensure rendered_combined matches full image size
+            # Resize / composite over original image
             h_r, w_r = rendered_combined.shape[:2]
             if (h_r, w_r) != (h_full, w_full):
-                if (w_r, h_r) == (h_full, w_full):
-                    rendered_combined = np.transpose(rendered_combined, (1, 0, 2))
-                else:
-                    rendered_combined = cv2.resize(rendered_combined, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
+                rendered_combined = cv2.resize(rendered_combined, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
 
-            # Composite RGBA over original image (both in [0,1] float)
             full_img_rgb = img_cv2.astype(np.float32)[:, :, ::-1] / 255.0
             alpha = rendered_combined[..., 3:4].astype(np.float32)
             if alpha.max() > 1.5:
-                alpha = alpha / 255.0
+                alpha /= 255.0
             rgb = rendered_combined[..., :3].astype(np.float32)
-            input_img_overlay = full_img_rgb * (1.0 - alpha) + rgb * alpha
-            input_img_overlay = np.clip(input_img_overlay, 0.0, 1.0)
-            final_render_bgr = (input_img_overlay[:, :, ::-1] * 255).astype(np.uint8)
+            overlay = full_img_rgb * (1 - alpha) + rgb * alpha
+            overlay = np.clip(overlay, 0.0, 1.0)
+            final_render_bgr = (overlay[:, :, ::-1] * 255).astype(np.uint8)
 
             _, png_bytes = cv2.imencode(".png", final_render_bgr)
             rendered_b64 = base64.b64encode(png_bytes).decode("utf-8")
