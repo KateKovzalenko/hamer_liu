@@ -105,25 +105,6 @@ class HamerProcessor(BaseProcessor):
         # Renderer setup
         self.renderer = Renderer(self.model_cfg, faces=self.model.mano.faces)
         self.LIGHT_BLUE = (0.65, 0.74, 0.86)
-
-    """def _project_vertices_to_pixels(self, vertices, cam_t, focal_length, img_res):
-        
-        Converts 3D vertices from camera coordinates to 2D image pixels.
-        vertices: Nx3 numpy array in camera coords
-        cam_t: 3-element translation vector
-        focal_length: scalar
-        img_res: tuple (width, height)
-    
-        vertices = vertices + cam_t[None, :]  # add camera translation
-        x = vertices[:, 0].cpu()
-        y = vertices[:, 1].cpu()
-        z = vertices[:, 2].cpu() + 1e-8  # avoid divide by zero
-
-        u = focal_length * (x / z) + img_res[0] / 2  #project to pixel u
-        v = focal_length * (y / z) + img_res[1] / 2  #project to pixel v
-
-        pixels = np.stack([u, v], axis=-1)
-        return pixels  # return pixel coordinates"""""
     
     def _project_vertices_to_pixels(
         self,

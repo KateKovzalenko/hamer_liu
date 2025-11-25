@@ -112,20 +112,22 @@ def plot_3d_vertices(data, title='3D Vertex Plot', *, block: bool = True):
             continue
             
         color = colors[i % len(colors)]
-        ax.scatter(cloud[:, 0], cloud[:, 1], cloud[:, 2], c=color, marker='o', label=f'Cloud {i}')
+        # Swap Y and Z: (X, Z, Y) instead of (X, Y, Z)
+        ax.scatter(cloud[:, 0], cloud[:, 2], cloud[:, 1], c=color, marker='o', label=f'Cloud {i}')
 
     # --- Set Labels and Title ---
     ax.set_xlabel('X Coordinate')
-    ax.set_ylabel('Y Coordinate')
-    ax.set_zlabel('Z Coordinate')
+    ax.set_ylabel('Z Coordinate')
+    ax.set_zlabel('Y Coordinate')
     ax.set_title(title)
     if len(point_clouds) > 1:
         ax.legend()
 
     # --- Set equal aspect ratio ---
     x_coords_all = all_points[:, 0]
-    y_coords_all = all_points[:, 1]
-    z_coords_all = all_points[:, 2]
+    # After swap: Y becomes Z, Z becomes Y
+    z_coords_all = all_points[:, 1]  # original Y
+    y_coords_all = all_points[:, 2]  # original Z
 
     max_range = np.array([x_coords_all.max() - x_coords_all.min(), 
                           y_coords_all.max() - y_coords_all.min(), 
