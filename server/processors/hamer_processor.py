@@ -112,17 +112,18 @@ class HamerProcessor(BaseProcessor):
         cam_t,                           # (3,) can be numpy or torch
         focal_length: float,
         img_res: tuple[int, int]         # (W, H)
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Convert HaMeR 3D verts (mm space) into pixel space (u, v, z_px).
+        Convert HaMeR 3D verts (mm space) into Camera Space XYZ and Pixel Space XY.
         
         Returns:
-            np.ndarray (N, 3): [u_px, v_px, z_px]
+            vertices_cam (np.ndarray): (N, 3) [X, Y, Z] in camera metric space.
+            vertices_px (np.ndarray): (N, 2) [u_px, v_px] in image pixel space.
         """
 
-         # ---------------------------
+        # ---------------------------
         # 0) Make focal_length safe
-        # ---------------------------  # ← NEW
+        # ---------------------------
         if isinstance(focal_length, torch.Tensor):
             focal_length = float(focal_length.detach().cpu())
 
@@ -144,6 +145,7 @@ class HamerProcessor(BaseProcessor):
         # ---------------------------
         # 3) Apply camera translation
         # --------------------------- 
+        # This results in the 3D coordinates in the camera frame
         X = verts_cpu[:, 0] + tx
         Y = -(verts_cpu[:, 1] + ty)
         Z = verts_cpu[:, 2] + tz + 1e-8   # avoid divide-by-zero
@@ -157,11 +159,15 @@ class HamerProcessor(BaseProcessor):
         v = focal_length * (Y / Z) + (H / 2)
 
         # ---------------------------
-        # 5) final pixel-space XYZ
+        # 5) Pack results
         # ---------------------------
-        verts_px = torch.stack([u, v, Z], dim=1).numpy()
+        # 3D Camera Coordinates
+        verts_cam = np.stack([X, Y, Z], axis=1)
+        
+        # 2D Pixel Coordinates
+        verts_px = np.stack([u, v], axis=1)
 
-        return verts_px
+        return verts_cam, verts_px
 
     # -------------------------
     # Internal processing logic
@@ -261,16 +267,18 @@ class HamerProcessor(BaseProcessor):
                 img_res = (img_cv2.shape[1], img_cv2.shape[0])
 
                 # --- Convert vertices to pixel coordinates ---
-                verts_pixels = self._project_vertices_to_pixels(
+                # Unpack both the 3D Camera Space coords and 2D Pixel Space coords
+                verts_cam_xyz, verts_pixel_xy = self._project_vertices_to_pixels(
                     vertices=verts_n,  # CUDA tensor
                     cam_t=cam_t_n,     # NumPy array OK
                     focal_length=scaled_focal_length,
                     img_res=img_res
                 )
-
+                
                 all_results["hands"].append({
                     "is_right": bool(is_r_n),
-                    "vertices": verts_pixels.tolist(),  # pixel coordinates
+                    "vertices_3d": verts_cam_xyz.tolist(),   # XYZ in Camera Space
+                    "vertices_pixel": verts_pixel_xy.tolist(), # XY in Pixel Space
                     "camera_translation": cam_t_n.tolist(),
                 })
 
