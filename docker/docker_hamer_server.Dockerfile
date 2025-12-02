@@ -40,10 +40,6 @@ RUN pip install "gdown==5.2.0"
 RUN pip install "Flask==2.3.3"
 RUN pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu118
 
-# Consider removing when switching to HaMeR
-RUN pip install "opencv-contrib-python==4.11.0.86"
-RUN pip install "mediapipe==0.10.7"
-
 # ------------------------------------------------------------
 # Install Jupyter and matplotlib (for interactive plotting)
 # ------------------------------------------------------------

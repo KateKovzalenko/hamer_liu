@@ -41,7 +41,7 @@ Clone the `hamer` repository, including its submodules (like ViTPose).
 ```bash
 git clone --recursive https://github.com/KateKovzalenko/hamer_liu
 cd hamer
-
+```
 
 **Download MANO Model:**
 

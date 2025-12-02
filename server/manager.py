@@ -12,7 +12,6 @@ class Manager:
         self.app.config['JSON_AS_ASCII'] = False
         # Optional: if you stream large files or responses
         self.app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
-        self.processor_mp = create_processor(ProcessorType.MEDIAPIPE)
         self.hamer_processor = create_processor(ProcessorType.HAMER)
         self._register_routes()
 
@@ -28,11 +27,6 @@ class Manager:
                 return jsonify({"error": "No file uploaded"}), 400
             result = self.hamer_processor.process_image_file(file)
             return jsonify(result)
-        """def upload_image():
-            file = request.files.get('file')
-            if not file:
-                return jsonify({"error": "No file uploaded"}), 400
-            return jsonify(self.processor_mp.process_image_file(file))"""
         
         @self.app.route('/upload/video', methods=['POST'])
         def upload_video():
@@ -47,7 +41,6 @@ class Manager:
                 print(tb_str)  # Prints full traceback in server logs
                 return jsonify({"error": str(e), "traceback": tb_str}), 500
             return jsonify(result)
-            #return jsonify(self.hamer_processor.process_video_file(file))
             
     def run(self):
         self.app.run(host=self.host, port=self.port)
