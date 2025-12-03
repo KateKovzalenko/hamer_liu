@@ -3,6 +3,7 @@ import tempfile
 import urllib.request
 import base64
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Dict, Any, Tuple, List, Optional, Union
 
 import torch
@@ -10,7 +11,6 @@ import cv2
 import numpy as np
 
 # Third-party library imports
-from IPython import embed
 from hamer.configs import CACHE_DIR_HAMER
 from hamer.models import download_models, load_hamer, DEFAULT_CHECKPOINT
 from hamer.datasets.vitdet_dataset import ViTDetDataset
@@ -21,38 +21,57 @@ from detectron2.config import LazyConfig
 import hamer
 
 # Local/Custom imports
-from ..utils_debug import save_img
-from .base_processor import BaseProcessor
+# Assumed to exist based on original snippet
+from .base_processor import BaseProcessor 
 from vitpose_model import ViTPoseModel
 
-# --- Constants & Configuration ---
-FINAL_MODEL_FILENAME = "model_final_f05665.pkl"
-FINAL_MODEL_PATH = str(Path(CACHE_DIR_HAMER) / FINAL_MODEL_FILENAME)
-MODEL_URL = (
-    "https://dl.fbaipublicfiles.com/detectron2/ViTDet/COCO/"
-    "cascade_mask_rcnn_vitdet_h/f328730692/model_final_f05665.pkl"
-)
+# --- Configuration Management ---
 
-ASSETS = [DEFAULT_CHECKPOINT, FINAL_MODEL_PATH]
+@dataclass
+class HamerConfig:
+    """Immutable configuration for HamerProcessor."""
+    device: str
+    confidence_threshold: float = 0.5
+    box_threshold: float = 0.25
+    hand_keypoint_threshold: float = 0.5
+    min_valid_keypoints: int = 3
+    batch_size: int = 8
+    light_blue: Tuple[float, float, float] = (0.65, 0.74, 0.86)
+    
+    # Model Paths
+    final_model_filename: str = "model_final_f05665.pkl"
+    model_url: str = (
+        "https://dl.fbaipublicfiles.com/detectron2/ViTDet/COCO/"
+        "cascade_mask_rcnn_vitdet_h/f328730692/model_final_f05665.pkl"
+    )
+
+    @property
+    def cache_dir(self) -> Path:
+        return Path(CACHE_DIR_HAMER)
+
+    @property
+    def final_model_path(self) -> Path:
+        return self.cache_dir / self.final_model_filename
 
 # --- Global Helper Functions ---
 
-def _assets_ready(cache_dir: Path) -> bool:
-    sentinel = cache_dir / ".assets_ready"
+def _assets_ready(config: HamerConfig) -> bool:
+    sentinel = config.cache_dir / ".assets_ready"
+    assets = [DEFAULT_CHECKPOINT, str(config.final_model_path)]
+    
     if sentinel.exists():
         return True
-    if not all(Path(asset).exists() for asset in ASSETS):
+    if not all(Path(asset).exists() for asset in assets):
         return False
     sentinel.touch()
     return True
 
-def _remove_tar_gz_files(cache_dir: Union[str, Path]) -> int:
+def _remove_tar_gz_files(cache_dir: Path) -> int:
     """Remove top-level .tar.gz files in cache_dir (non-recursive)."""
-    cache_path = Path(cache_dir)
-    if not cache_path.is_dir():
+    if not cache_dir.is_dir():
         return 0
     removed = 0
-    for p in cache_path.iterdir():
+    for p in cache_dir.iterdir():
         if p.is_file() and p.name.endswith(".tar.gz"):
             try:
                 p.unlink()
@@ -61,38 +80,36 @@ def _remove_tar_gz_files(cache_dir: Union[str, Path]) -> int:
                 pass
     return removed
 
-def ensure_hamer_assets() -> None:
-    cache_dir = Path(CACHE_DIR_HAMER)
-    cache_dir.mkdir(parents=True, exist_ok=True)
+def ensure_hamer_assets(config: HamerConfig) -> None:
+    config.cache_dir.mkdir(parents=True, exist_ok=True)
     
-    if _assets_ready(cache_dir):
+    if _assets_ready(config):
         return
 
     print("Downloading final model for ViTDet human detector...")
-    urllib.request.urlretrieve(MODEL_URL, FINAL_MODEL_PATH)
+    urllib.request.urlretrieve(config.model_url, str(config.final_model_path))
 
     print("Downloading HaMeR model and assets...")
-    download_models(str(cache_dir))
+    download_models(str(config.cache_dir))
     
-    _assets_ready(cache_dir)
-    _remove_tar_gz_files(cache_dir)
+    _assets_ready(config)
+    _remove_tar_gz_files(config.cache_dir)
 
 # --- Main Class ---
 
 class HamerProcessor(BaseProcessor):
-    """Processor implementation using HaMeR 3D Hand Mesh Reconstruction."""
-
-    # Configuration Constants
-    CONFIDENCE_THRESHOLD = 0.5
-    BOX_THRESHOLD = 0.25
-    HAND_KEYPOINT_THRESHOLD = 0.5
-    MIN_VALID_KEYPOINTS = 3
-    BATCH_SIZE = 8
-    LIGHT_BLUE = (0.65, 0.74, 0.86)
+    """
+    High-Performance Processor for HaMeR 3D Hand Mesh Reconstruction.
+    Optimized for GPU execution and architectural separation of concerns.
+    """
 
     def __init__(self, device: str = None):
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        ensure_hamer_assets()
+        # Resolve device: Prioritize argument -> CUDA -> CPU
+        resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.config = HamerConfig(device=resolved_device)
+        self.device = torch.device(self.config.device)
+        
+        ensure_hamer_assets(self.config)
         self._init_models()
 
     def _init_models(self):
@@ -105,28 +122,30 @@ class HamerProcessor(BaseProcessor):
         # 2. ViTDet (Human Detector)
         cfg_path = Path(hamer.__file__).parent / "configs" / "cascade_mask_rcnn_vitdet_h_75ep.py"
         detectron2_cfg = LazyConfig.load(str(cfg_path))
-        detectron2_cfg.train.init_checkpoint = FINAL_MODEL_PATH
+        detectron2_cfg.train.init_checkpoint = str(self.config.final_model_path)
+        
+        # Apply threshold to box predictors
         for i in range(3):
-            detectron2_cfg.model.roi_heads.box_predictors[i].test_score_thresh = self.BOX_THRESHOLD
+            detectron2_cfg.model.roi_heads.box_predictors[i].test_score_thresh = self.config.box_threshold
+            
         self.detector = DefaultPredictor_Lazy(detectron2_cfg)
 
         # 3. ViTPose (Keypoint Detector)
         self.vitpose = ViTPoseModel(self.device)
 
         # 4. Renderer
-        # We initialize the renderer with the base MANO faces. 
-        # The renderer class handles adding watertight faces internally.
         self.renderer = Renderer(self.model_cfg, faces=self.model.mano.faces)
 
     # --------------------------------------------------------------------------
-    # Core Pipeline Steps (SOC: Separation of Concerns)
+    # Core Pipeline Steps
     # --------------------------------------------------------------------------
 
     def _detect_humans(self, img_cv2: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """Run Detectron2 to find humans."""
+        # Detectron2 LazyConfig models expect BGR standard input
         det_out = self.detector(img_cv2)
         det_instances = det_out["instances"]
-        valid_idx = (det_instances.pred_classes == 0) & (det_instances.scores > self.CONFIDENCE_THRESHOLD)
+        valid_idx = (det_instances.pred_classes == 0) & (det_instances.scores > self.config.confidence_threshold)
         
         if valid_idx.sum() == 0:
             return None, None
@@ -137,6 +156,7 @@ class HamerProcessor(BaseProcessor):
 
     def _extract_hand_bboxes(self, img_rgb: np.ndarray, pred_bboxes: np.ndarray, pred_scores: np.ndarray) -> Tuple[List[Any], List[int]]:
         """Run ViTPose and extract hand bounding boxes from body keypoints."""
+        # Batch preparation for ViTPose
         vitposes_out = self.vitpose.predict_pose(
             img_rgb, 
             [np.concatenate([pred_bboxes, pred_scores[:, None]], axis=1)]
@@ -146,13 +166,14 @@ class HamerProcessor(BaseProcessor):
         is_right = []
 
         for vitposes in vitposes_out:
-            # Indices for hands in common pose formats (usually COCO-like)
+            # Keypoint indices: Left hand [-42:-21], Right hand [-21:]
             left_hand_keyp = vitposes["keypoints"][-42:-21]
             right_hand_keyp = vitposes["keypoints"][-21:]
 
             for keypoints, is_r_flag in [(left_hand_keyp, 0), (right_hand_keyp, 1)]:
-                valid = keypoints[:, 2] > self.HAND_KEYPOINT_THRESHOLD
-                if valid.sum() > self.MIN_VALID_KEYPOINTS:
+                valid = keypoints[:, 2] > self.config.hand_keypoint_threshold
+                if valid.sum() > self.config.min_valid_keypoints:
+                    # Calculate bounding box from valid keypoints
                     bbox = [
                         keypoints[valid, 0].min(),
                         keypoints[valid, 1].min(),
@@ -173,7 +194,7 @@ class HamerProcessor(BaseProcessor):
         """Run the actual HaMeR model on extracted hand boxes."""
         dataset = ViTDetDataset(self.model_cfg, img_cv2, boxes, right_flags)
         dataloader = torch.utils.data.DataLoader(
-            dataset, batch_size=self.BATCH_SIZE, shuffle=False, num_workers=0
+            dataset, batch_size=self.config.batch_size, shuffle=False, num_workers=0
         )
 
         inference_results = []
@@ -192,132 +213,133 @@ class HamerProcessor(BaseProcessor):
             box_center = batch["box_center"].float()
             box_size = batch["box_size"].float()
             img_size = batch["img_size"].float()
+            
+            # Focal length calculation (scalar per image usually, but calculated batch-wise here)
             scaled_focal_length = (
                 self.model_cfg.EXTRA.FOCAL_LENGTH / 
                 self.model_cfg.MODEL.IMAGE_SIZE * img_size.max()
             )
 
+            # Convert crop camera parameters to full image space
             pred_cam_t_full = cam_crop_to_full(
                 pred_cam, box_center, box_size, img_size, scaled_focal_length
-            ).detach().cpu().numpy()
+            )
 
             batch_len = pred_cam.shape[0]
             for n in range(batch_len):
-                verts_n = out["pred_vertices"][n]  # Keep on CUDA for rendering later if needed
+                verts_n = out["pred_vertices"][n] # Tensor on GPU
                 is_r_n = int(batch["right"][n].detach().item())
                 
                 # Flip left hand vertices to match right hand canonical space if needed
-                # (Logic copied from original: Left hand needs X-flip)
-                verts_n[:, 0] = (2 * is_r_n - 1) * verts_n[:, 0]
+                # Operation performed on GPU
+                if is_r_n == 0:
+                    verts_n[:, 0] = -1 * verts_n[:, 0]
                 
-                cam_t_n = pred_cam_t_full[n]
+                cam_t_n = pred_cam_t_full[n] # Tensor on GPU
                 
                 inference_results.append({
                     "vertices_cuda": verts_n,
-                    "cam_t": cam_t_n,
+                    "cam_t_cuda": cam_t_n,
                     "is_right": is_r_n,
-                    "focal_length": scaled_focal_length
+                    "focal_length": scaled_focal_length # Scalar tensor
                 })
         
         return inference_results
 
+    # --------------------------------------------------------------------------
+    # Projection Mathematics (Vectorized & GPU Optimized)
+    # --------------------------------------------------------------------------
+
     def _project_vertices_to_pixels(
             self,
             vertices: torch.Tensor,
-            cam_t: np.ndarray,
+            cam_t: torch.Tensor,
             focal_length: float,
             img_res: tuple[int, int]
-        ) -> Tuple[np.ndarray, np.ndarray]:
-            """
-            Convert 3D verts to Camera Space XYZ and Pixel Space XY.
-            Matches the transformation logic in renderer.py -> render_rgba_multiple.
-            """
-            
-            # 1. Prepare Inputs
-            if isinstance(focal_length, torch.Tensor):
-                focal_length = float(focal_length.detach().cpu())
+        ) -> torch.Tensor:
+        """
+        Convert 3D verts to Pixel Space XY.
+        Operations performed entirely on GPU to avoid sync overhead.
+        """
+        # Ensure scalar is float, not Tensor
+        if isinstance(focal_length, torch.Tensor):
+            focal_length = focal_length.item()
 
-            verts_cpu = vertices.detach().cpu().numpy()
-            tx, ty, tz = cam_t
+        tx, ty, tz = cam_t[0], cam_t[1], cam_t[2]
 
-            # 2. Apply Camera Translation (World -> Camera Frame Base)
-            # Matches `vertices_to_trimesh`: mesh = Trimesh(vertices + camera_translation, ...)
-            X_trans = verts_cpu[:, 0] + tx
-            Y_trans = verts_cpu[:, 1] + ty
-            Z_trans = verts_cpu[:, 2] + tz
+        # 1. Apply Camera Translation (World -> Camera Frame Base)
+        X_trans = vertices[:, 0] + tx
+        Y_trans = vertices[:, 1] + ty
+        Z_trans = vertices[:, 2] + tz
 
-            # 3. Apply Rotation (RotX 180 degrees)
-            # Matches `vertices_to_trimesh`: mesh.apply_transform(rot_matrix(180, [1,0,0]))
-            # RotX(180) maps: (x, y, z) -> (x, -y, -z)
-            X_view = X_trans
-            Y_view = Y_trans
-            Z_view = -Z_trans
+        # 2. Apply Rotation (RotX 180 degrees)
+        # RotX(180) maps: (x, y, z) -> (x, -y, -z)
+        X_view = X_trans
+        Y_view = Y_trans
+        Z_view = -Z_trans
 
-            # 4. Perspective Projection
-            # PyRender/OpenGL Camera looks down -Z axis.
-            # Depth is distance along the Z axis: depth = -Z_view
-            # Matches `pyrender.IntrinsicsCamera` projection logic.
-            depth = -Z_view + 1e-8 # Avoid division by zero
-            
-            W, H = img_res
-            cx, cy = W / 2.0, H / 2.0
+        # 3. Perspective Projection
+        # Depth is distance along the Z axis: depth = -Z_view
+        depth = -Z_view + 1e-8 # Avoid division by zero
+        
+        W, H = img_res
+        cx, cy = W / 2.0, H / 2.0
 
-            # Standard Pinhole Projection: u = fx * (x / depth) + cx
-            u = focal_length * (X_view / depth) + cx
-            v = focal_length * (Y_view / depth) + cy
+        # Standard Pinhole Projection: u = fx * (x / depth) + cx
+        u = focal_length * (X_view / depth) + cx
+        v = focal_length * (Y_view / depth) + cy
 
-            # 5. Pack Results
-            # We return the "Camera Space" coordinates as (X_view, Y_view, depth)
-            # so that Z represents positive depth from the camera.
-            verts_cam = np.stack([X_view, Y_view, depth], axis=1)
-            verts_px = np.stack([u, v], axis=1)
-
-            return verts_cam, verts_px
+        return torch.stack([u, v], dim=1)
 
     def _project_vertices_to_planar_z0(
         self,
         vertices: torch.Tensor,
-        cam_t: np.ndarray,
+        cam_t: torch.Tensor,
         focal_length: float
-    ) -> np.ndarray:
+    ) -> Tuple[torch.Tensor, float]:
         """
-        New Method: Project 3D vertices onto the Z=0 plane while preserving 
-        perspective-based scaling and relative volume.
+        Project 3D vertices onto the Z=0 plane while preserving perspective-based scaling.
         
-        This shifts all hands to have a mean Z of 0, but scales the Z values 
-        so that the hand's volume (aspect ratio) remains consistent with the 
-        projected X and Y dimensions.
+        FIXED: scaling_factor is now returned as a scalar (mean scale) rather than a 
+        per-vertex tensor, correcting the downstream serialization issue.
         """
         if isinstance(focal_length, torch.Tensor):
-            focal_length = float(focal_length.detach().cpu())
+            focal_length = focal_length.item()
 
-        verts_cpu = vertices.detach().cpu().numpy()
-        tx, ty, tz = cam_t
+        tx, ty, tz = cam_t[0], cam_t[1], cam_t[2]
 
-        # 1. Transform to Camera Space (preserve relative spatial coords)
-        X = verts_cpu[:, 0] + tx
-        Y = (verts_cpu[:, 1] + ty)
-        Z = verts_cpu[:, 2] + tz + 1e-8  # Avoid division by zero
+        # 1. Transform to Camera Space
+        X = vertices[:, 0] + tx
+        Y = (vertices[:, 1] + ty)
+        Z = vertices[:, 2] + tz + 1e-8
 
         # 2. Calculate Perspective Scale Factor for X and Y
         # This determines how much to shrink/expand based on distance from camera.
-        scale_factor = focal_length / Z
+        scale_factor_vec = focal_length / Z
 
-        # 3. Apply Projection to X and Y (matches image perspective)
-        X_planar = X * scale_factor
-        Y_planar = Y * scale_factor
+        # 3. Apply Projection to X and Y
+        X_planar = X * scale_factor_vec
+        Y_planar = Y * scale_factor_vec
         
         # 4. Handle Z (Volume Preservation)
-        # To keep the "thickness" of the hand proportional to the projected X/Y,
-        # we scale the Z values by the 'weak perspective' scale factor (scale at the centroid).
-        # We then shift the result so the mean Z is 0.
-        Z_mean = np.mean(Z)
+        # Calculate the mean depth of the hand
+        Z_mean = torch.mean(Z)
+        
+        # Calculate the scalar scaling factor for the centroid
         scale_mean = focal_length / Z_mean
         
-        # Z_planar centers the volume at 0 and scales it to match the view scale
+        # Center volume at 0 and scale by the mean scale
         Z_planar = (Z - Z_mean) * scale_mean
 
-        return np.stack([X_planar, Y_planar, Z_planar], axis=1)
+        # Stack X, Y, Z
+        planar_verts = torch.stack([X_planar, Y_planar, Z_planar], dim=1)
+        
+        # Return the tensor and the scalar float for the whole object
+        return planar_verts, scale_mean.item()
+
+    # --------------------------------------------------------------------------
+    # Rendering & Processing
+    # --------------------------------------------------------------------------
 
     def _render_scene(
         self, 
@@ -328,20 +350,21 @@ class HamerProcessor(BaseProcessor):
         if not inference_results:
             return ""
 
+        # Move to CPU only when strictly necessary for the renderer (if it's not GPU compatible)
+        # Assuming Hamer renderer needs numpy arrays:
         all_verts = [res["vertices_cuda"].detach().cpu().numpy() for res in inference_results]
-        all_cam_t = [res["cam_t"] for res in inference_results]
+        all_cam_t = [res["cam_t_cuda"].detach().cpu().numpy() for res in inference_results]
         all_right = [res["is_right"] for res in inference_results]
 
         h_full, w_full = img_cv2.shape[:2]
         
-        # Attempt to use efficient batch renderer if available
+        # Efficient batch rendering
         render_fn = getattr(self.renderer, "render_rgba_multiple", None)
         
-        # Calculate focal length based on first result (assuming uniform image batch)
-        # Note: Original code re-calculates this per batch, but usually it's per image.
-        # We take the first valid one.
-        focal_length = float(inference_results[0]["focal_length"])
-        # Original logic re-scales focal length for full render resolution
+        focal_length_val = inference_results[0]["focal_length"]
+        if isinstance(focal_length_val, torch.Tensor):
+            focal_length_val = focal_length_val.item()
+
         scaled_focal_length_full = (
             self.model_cfg.EXTRA.FOCAL_LENGTH / 
             self.model_cfg.MODEL.IMAGE_SIZE * max(h_full, w_full)
@@ -356,17 +379,17 @@ class HamerProcessor(BaseProcessor):
                 render_res=(w_full, h_full),
                 focal_length=scaled_focal_length_full,
                 is_right=all_right,
-                mesh_base_color=self.LIGHT_BLUE,
+                mesh_base_color=self.config.light_blue,
                 scene_bg_color=(1, 1, 1),
             )
         else:
-            # Fallback manual rendering loop
+            # Fallback
             renders = []
             for verts, cam_t in zip(all_verts, all_cam_t):
                 try:
                     r = self.renderer(
                         verts, cam_t, img_cv2,
-                        mesh_base_color=self.LIGHT_BLUE,
+                        mesh_base_color=self.config.light_blue,
                         scene_bg_color=(1, 1, 1)
                     )
                     renders.append(r)
@@ -383,8 +406,7 @@ class HamerProcessor(BaseProcessor):
                 )
                 rendered_combined[..., 3:4] = np.clip(rendered_combined[..., 3:4] + alpha, 0, 1)
 
-        # Composite over original image
-        # Resize if necessary (safety check)
+        # Composite
         if rendered_combined.shape[:2] != (h_full, w_full):
              rendered_combined = cv2.resize(
                  rendered_combined, (w_full, h_full), interpolation=cv2.INTER_LINEAR
@@ -402,10 +424,6 @@ class HamerProcessor(BaseProcessor):
 
         _, png_bytes = cv2.imencode(".png", final_render_bgr)
         return base64.b64encode(png_bytes).decode("utf-8")
-
-    # --------------------------------------------------------------------------
-    # Main Processing Logic (Clean & Linear)
-    # --------------------------------------------------------------------------
 
     def _process_image_np(
         self, 
@@ -436,36 +454,36 @@ class HamerProcessor(BaseProcessor):
         img_res = (img_cv2.shape[1], img_cv2.shape[0])
 
         for res in inference_results:
-            # Standard Projection
-            verts_cam, verts_px = self._project_vertices_to_pixels(
+            # Optimized GPU Projections
+            verts_px_tensor = self._project_vertices_to_pixels(
                 vertices=res["vertices_cuda"],
-                cam_t=res["cam_t"],
+                cam_t=res["cam_t_cuda"],
                 focal_length=res["focal_length"],
                 img_res=img_res
             )
             
-            # New Planar Projection (Z centered at 0 with volume scaling)
-            verts_planar = self._project_vertices_to_planar_z0(
+            verts_planar_tensor, scale_scalar = self._project_vertices_to_planar_z0(
                 vertices=res["vertices_cuda"],
-                cam_t=res["cam_t"],
+                cam_t=res["cam_t_cuda"],
                 focal_length=res["focal_length"]
             )
             
-            # CRITICAL FIX: Convert Tensor to list for JSON serialization
-            # res["vertices_cuda"] is a Torch Tensor on GPU/CPU.
+            # --- Serialization (Move to CPU now) ---
             verts_3d_list = res["vertices_cuda"].detach().cpu().numpy().tolist()
+            verts_px_list = verts_px_tensor.detach().cpu().numpy().tolist()
+            verts_planar_list = verts_planar_tensor.detach().cpu().numpy().tolist()
+            cam_t_list = res["cam_t_cuda"].detach().cpu().numpy().tolist()
 
-            # Retrieve the correct faces from the renderer to ensure the mesh is 
-            # consistent with the rendering (watertight, correct winding order).
             is_right_hand = bool(res["is_right"])
             faces_arr = self.renderer.faces if is_right_hand else self.renderer.faces_left
 
             output_data["hands"].append({
                 "is_right": is_right_hand,
                 "vertices_3d": verts_3d_list,
-                "vertices_pixel": verts_px.tolist(),
-                "camera_translation": res["cam_t"].tolist(),
-                "vertices_planar_z0": verts_planar.tolist(),
+                "vertices_pixel": verts_px_list,
+                "camera_translation": cam_t_list,
+                "vertices_planar_z0": verts_planar_list,
+                "scaling_factor_planar_z0": scale_scalar,
                 "faces": faces_arr.tolist()
             })
 
@@ -479,7 +497,6 @@ class HamerProcessor(BaseProcessor):
     def _process_video(self, file_path: str, sample_rate: int = 100) -> Dict[str, Any]:
         """
         Process video file by sampling frames.
-        Uses the same pipeline as image processing to ensure DRY.
         """
         cap = cv2.VideoCapture(file_path)
         if not cap.isOpened():
@@ -496,13 +513,10 @@ class HamerProcessor(BaseProcessor):
                 
                 frame_count += 1
                 
-                # Logic: Process first frame fully (with render), 
-                # sample subsequent frames without render.
                 if frame_count == 1:
                     result = self._process_image_np(frame, render=True)
                     sampled_results.append(result)
                 elif frame_count % sample_rate == 0:
-                    # Reuse the same pipeline, just disable rendering
                     try:
                         result = self._process_image_np(frame, render=False)
                         sampled_results.append(result)
@@ -522,15 +536,14 @@ class HamerProcessor(BaseProcessor):
     # -------------------------
     
     def process_image_file(self, file) -> Dict[str, Any]:
-        """Process an uploaded image file-like object (from Flask)."""
+        """Process an uploaded image file-like object."""
         filestr = file.read()
         npimg = np.frombuffer(filestr, np.uint8)
         image_np = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
         return self._process_image_np(image_np, render=True)
 
     def process_video_file(self, file) -> Dict[str, Any]:
-        """Process an uploaded video file-like object (from Flask)."""
-        # Save uploaded file to a temp location
+        """Process an uploaded video file-like object."""
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             tmp.write(file.read())
             tmp_path = tmp.name
@@ -538,7 +551,6 @@ class HamerProcessor(BaseProcessor):
         try:
             result = self._process_video(tmp_path)
         finally:
-            # Ensure cleanup happens even if processing crashes
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
