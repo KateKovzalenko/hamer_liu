@@ -25,7 +25,17 @@ class Manager:
             file = request.files.get("file")
             if not file:
                 return jsonify({"error": "No file uploaded"}), 400
-            result = self.hamer_processor.process_image_file(file)
+            
+            # Extract parameters from the multipart form data
+            # Defaults match the processor's method signature
+            person_selector = request.form.get("person_selector", "all")
+            hand_side = request.form.get("hand_side", "both")
+
+            result = self.hamer_processor.process_image_file(
+                file, 
+                person_selector=person_selector, 
+                hand_side=hand_side
+            )
             return jsonify(result)
         
         @self.app.route('/upload/video', methods=['POST'])
@@ -33,8 +43,17 @@ class Manager:
             file = request.files.get('file')
             if not file:
                 return jsonify({"error": "No file uploaded"}), 400
+            
+            # Extract parameters from the multipart form data
+            person_selector = request.form.get("person_selector", "all")
+            hand_side = request.form.get("hand_side", "both")
+
             try:
-                result = self.hamer_processor.process_video_file(file)
+                result = self.hamer_processor.process_video_file(
+                    file,
+                    person_selector=person_selector,
+                    hand_side=hand_side
+                )
             except Exception as e:
                 import traceback
                 tb_str = traceback.format_exc()
