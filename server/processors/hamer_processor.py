@@ -4,7 +4,7 @@ import urllib.request
 import base64
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, Any, Tuple, List, Optional, Union
+from typing import Dict, Any, Tuple, List, Optional, Union, Literal
 
 import torch
 import cv2
@@ -21,12 +21,11 @@ from detectron2.config import LazyConfig
 import hamer
 
 # Local/Custom imports
-# Assumed to exist based on original snippet
-from .base_processor import BaseProcessor 
+# Assuming .base_processor and vitpose_model exist in your environment
+from .base_processor import BaseProcessor
 from vitpose_model import ViTPoseModel
 
 # --- Configuration Management ---
-
 @dataclass
 class HamerConfig:
     """Immutable configuration for HamerProcessor."""
@@ -154,23 +153,98 @@ class HamerProcessor(BaseProcessor):
         pred_scores = det_instances.scores[valid_idx].cpu().numpy()
         return pred_bboxes, pred_scores
 
-    def _extract_hand_bboxes(self, img_rgb: np.ndarray, pred_bboxes: np.ndarray, pred_scores: np.ndarray) -> Tuple[List[Any], List[int]]:
-        """Run ViTPose and extract hand bounding boxes from body keypoints."""
+    def _filter_humans(
+        self, 
+        pred_bboxes: np.ndarray, 
+        pred_scores: np.ndarray, 
+        selector: Union[str, int]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Filter human bounding boxes based on spatial position or index.
+        selector: 'all', 'left', 'center', 'right', or integer index.
+        """
+        if selector == "all":
+            return pred_bboxes, pred_scores
+        
+        num_people = len(pred_bboxes)
+        if num_people == 0:
+            return pred_bboxes, pred_scores
+
+        # Calculate centroids (X-axis) for sorting
+        # BBox format: [x1, y1, x2, y2]
+        centroids_x = (pred_bboxes[:, 0] + pred_bboxes[:, 2]) / 2.0
+        
+        # Sort indices based on X centroid (Left to Right)
+        sorted_indices = np.argsort(centroids_x)
+        
+        target_idx = -1
+        
+        if isinstance(selector, int):
+            if 0 <= selector < num_people:
+                target_idx = selector
+            else:
+                # If index out of bounds, default to 0 for robustness
+                target_idx = 0
+        elif isinstance(selector, str):
+            selector = selector.lower()
+            if selector == "left" or selector == "leftmost":
+                target_idx = 0
+            elif selector == "right" or selector == "rightmost":
+                target_idx = num_people - 1
+            elif selector == "center":
+                target_idx = num_people // 2
+            else:
+                # Fallback to all if string is unrecognized
+                return pred_bboxes, pred_scores
+
+        # Select the specific person
+        selected_real_idx = sorted_indices[target_idx]
+        return pred_bboxes[selected_real_idx:selected_real_idx+1], pred_scores[selected_real_idx:selected_real_idx+1]
+
+    def _extract_hand_bboxes(
+        self, 
+        img_rgb: np.ndarray, 
+        pred_bboxes: np.ndarray, 
+        pred_scores: np.ndarray,
+        hand_side_selector: str = "both"
+    ) -> List[Dict[str, Any]]:
+        """
+        Run ViTPose and extract hand bounding boxes from body keypoints.
+        Includes metadata about the parent person box.
+        
+        Returns:
+            List of dictionaries containing:
+            - 'hand_bbox': [x1, y1, x2, y2]
+            - 'is_right': 0 or 1
+            - 'person_bbox': [x1, y1, x2, y2]
+            - 'person_score': float
+        """
         # Batch preparation for ViTPose
         vitposes_out = self.vitpose.predict_pose(
             img_rgb, 
             [np.concatenate([pred_bboxes, pred_scores[:, None]], axis=1)]
         )
 
-        bboxes = []
-        is_right = []
+        candidates_output = []
+        target_side = hand_side_selector.lower()
 
-        for vitposes in vitposes_out:
+        # Iterate over each detected person
+        for i, vitposes in enumerate(vitposes_out):
+            current_person_bbox = pred_bboxes[i]
+            current_person_score = pred_scores[i]
+
             # Keypoint indices: Left hand [-42:-21], Right hand [-21:]
             left_hand_keyp = vitposes["keypoints"][-42:-21]
             right_hand_keyp = vitposes["keypoints"][-21:]
 
-            for keypoints, is_r_flag in [(left_hand_keyp, 0), (right_hand_keyp, 1)]:
+            # (keypoints, is_right_flag)
+            check_list = []
+            if target_side in ["left", "both"]:
+                check_list.append((left_hand_keyp, 0))
+            if target_side in ["right", "both"]:
+                check_list.append((right_hand_keyp, 1))
+
+            for keypoints, is_r_flag in check_list:
                 valid = keypoints[:, 2] > self.config.hand_keypoint_threshold
                 if valid.sum() > self.config.min_valid_keypoints:
                     # Calculate bounding box from valid keypoints
@@ -180,10 +254,15 @@ class HamerProcessor(BaseProcessor):
                         keypoints[valid, 0].max(),
                         keypoints[valid, 1].max(),
                     ]
-                    bboxes.append(bbox)
-                    is_right.append(is_r_flag)
+                    
+                    candidates_output.append({
+                        "hand_bbox": bbox,
+                        "is_right": is_r_flag,
+                        "person_bbox": current_person_bbox.tolist(), # Convert to list for serialization safety
+                        "person_score": float(current_person_score)
+                    })
 
-        return bboxes, is_right
+        return candidates_output
 
     def _run_hamer_inference(
         self, 
@@ -299,9 +378,6 @@ class HamerProcessor(BaseProcessor):
     ) -> Tuple[torch.Tensor, float]:
         """
         Project 3D vertices onto the Z=0 plane while preserving perspective-based scaling.
-        
-        FIXED: scaling_factor is now returned as a scalar (mean scale) rather than a 
-        per-vertex tensor, correcting the downstream serialization issue.
         """
         if isinstance(focal_length, torch.Tensor):
             focal_length = focal_length.item()
@@ -428,9 +504,17 @@ class HamerProcessor(BaseProcessor):
     def _process_image_np(
         self, 
         image_np: np.ndarray, 
-        render: bool = True
+        render: bool = True,
+        person_selector: Union[str, int] = "all",
+        hand_side: str = "both"
     ) -> Dict[str, Any]:
-        """Internal pipeline: Detect -> Inference -> Projection -> (Optional) Render."""
+        """
+        Internal pipeline: Detect -> Filter Humans -> Detect Hands -> Filter Hands -> Inference -> Projection.
+        
+        Args:
+            person_selector: 'all', 'left', 'center', 'right' (spatial), or integer index.
+            hand_side: 'both', 'left', 'right'.
+        """
         img_cv2 = image_np.copy()
         img_rgb = img_cv2[:, :, ::-1]
 
@@ -439,21 +523,38 @@ class HamerProcessor(BaseProcessor):
         if pred_bboxes is None:
             return {"error": "No person detected"}
 
-        # 2. Detect Hands
-        bboxes, is_right = self._extract_hand_bboxes(img_rgb, pred_bboxes, pred_scores)
-        if not bboxes:
-            return {"error": "No hands detected"}
+        # 2. Filter Humans (Optimization: Filter before pose estimation)
+        pred_bboxes, pred_scores = self._filter_humans(pred_bboxes, pred_scores, person_selector)
+        if len(pred_bboxes) == 0:
+             return {"error": "No person detected matching selection criteria"}
 
-        # 3. Run HaMeR
-        boxes_np = np.stack(bboxes)
-        right_np = np.stack(is_right)
+        # 3. Detect Hands with Side Filtering AND Parent Box Association
+        # hand_candidates is now a list of dicts with 'hand_bbox', 'is_right', 'person_bbox'
+        hand_candidates = self._extract_hand_bboxes(
+            img_rgb, 
+            pred_bboxes, 
+            pred_scores, 
+            hand_side_selector=hand_side
+        )
+        if not hand_candidates:
+            return {"error": "No hands detected matching selection criteria"}
+
+        # 4. Prepare batch for HaMeR
+        boxes_list = [c["hand_bbox"] for c in hand_candidates]
+        right_list = [c["is_right"] for c in hand_candidates]
+        
+        boxes_np = np.array(boxes_list)
+        right_np = np.array(right_list)
+        
+        # Run Inference
         inference_results = self._run_hamer_inference(img_cv2, boxes_np, right_np)
 
-        # 4. Process Results (Project to pixels)
+        # 5. Process Results (Project to pixels)
         output_data = {"hands": []}
         img_res = (img_cv2.shape[1], img_cv2.shape[0])
 
-        for res in inference_results:
+        # Zip inference results with the candidate metadata to retain person association
+        for res, candidate in zip(inference_results, hand_candidates):
             # Optimized GPU Projections
             verts_px_tensor = self._project_vertices_to_pixels(
                 vertices=res["vertices_cuda"],
@@ -477,26 +578,36 @@ class HamerProcessor(BaseProcessor):
             is_right_hand = bool(res["is_right"])
             faces_arr = self.renderer.faces if is_right_hand else self.renderer.faces_left
 
-            output_data["hands"].append({
+            hand_entry = {
                 "is_right": is_right_hand,
                 "vertices_3d": verts_3d_list,
                 "vertices_pixel": verts_px_list,
                 "camera_translation": cam_t_list,
                 "vertices_planar_z0": verts_planar_list,
                 "scaling_factor_planar_z0": scale_scalar,
-                "faces": faces_arr.tolist()
-            })
+                "faces": faces_arr.tolist(),
+                # NEW DATA FIELD: Person Bounding Box
+                "person_bounding_box_xyxy": candidate["person_bbox"],
+                "person_detection_score": candidate["person_score"]
+            }
+            output_data["hands"].append(hand_entry)
 
-        # 5. Render (Optional)
+        # 6. Render (Optional)
         if render:
             b64_image = self._render_scene(img_cv2, inference_results)
             output_data["full_frame_rendered_image_base64"] = b64_image
 
         return output_data
 
-    def _process_video(self, file_path: str, sample_rate: int = 100) -> Dict[str, Any]:
+    def _process_video(
+        self, 
+        file_path: str, 
+        sample_rate: int = 100,
+        person_selector: Union[str, int] = "all",
+        hand_side: str = "both"
+    ) -> Dict[str, Any]:
         """
-        Process video file by sampling frames.
+        Process video file by sampling frames with filtering options.
         """
         cap = cv2.VideoCapture(file_path)
         if not cap.isOpened():
@@ -514,11 +625,21 @@ class HamerProcessor(BaseProcessor):
                 frame_count += 1
                 
                 if frame_count == 1:
-                    result = self._process_image_np(frame, render=True)
+                    result = self._process_image_np(
+                        frame, 
+                        render=True, 
+                        person_selector=person_selector,
+                        hand_side=hand_side
+                    )
                     sampled_results.append(result)
                 elif frame_count % sample_rate == 0:
                     try:
-                        result = self._process_image_np(frame, render=False)
+                        result = self._process_image_np(
+                            frame, 
+                            render=False,
+                            person_selector=person_selector,
+                            hand_side=hand_side
+                        )
                         sampled_results.append(result)
                     except Exception as e:
                         sampled_results.append({"error": str(e)})
@@ -535,21 +656,49 @@ class HamerProcessor(BaseProcessor):
     # Flask interface methods
     # -------------------------
     
-    def process_image_file(self, file) -> Dict[str, Any]:
-        """Process an uploaded image file-like object."""
+    def process_image_file(
+        self, 
+        file, 
+        person_selector: Union[str, int] = "all",
+        hand_side: str = "both"
+    ) -> Dict[str, Any]:
+        """
+        Process an uploaded image file-like object with selection options.
+        
+        Args:
+            file: File-like object.
+            person_selector: "all", "left", "center", "right", or index (int).
+            hand_side: "both", "left", "right".
+        """
         filestr = file.read()
         npimg = np.frombuffer(filestr, np.uint8)
         image_np = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-        return self._process_image_np(image_np, render=True)
+        return self._process_image_np(
+            image_np, 
+            render=True,
+            person_selector=person_selector,
+            hand_side=hand_side
+        )
 
-    def process_video_file(self, file) -> Dict[str, Any]:
-        """Process an uploaded video file-like object."""
+    def process_video_file(
+        self, 
+        file,
+        person_selector: Union[str, int] = "all",
+        hand_side: str = "both"
+    ) -> Dict[str, Any]:
+        """
+        Process an uploaded video file-like object with selection options.
+        """
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             tmp.write(file.read())
             tmp_path = tmp.name
 
         try:
-            result = self._process_video(tmp_path)
+            result = self._process_video(
+                tmp_path, 
+                person_selector=person_selector,
+                hand_side=hand_side
+            )
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
