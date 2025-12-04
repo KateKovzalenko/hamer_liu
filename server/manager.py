@@ -6,14 +6,20 @@ class Manager:
         self.host = host
         self.port = port
         self.app = Flask(__name__)
-        # --- Add Flask configuration ---
-        self.app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB uploads
+        # Configuration
+        self.app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024 
         self.app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
         self.app.config['JSON_AS_ASCII'] = False
-        # Optional: if you stream large files or responses
         self.app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
+        
         self.hamer_processor = create_processor(ProcessorType.HAMER)
         self._register_routes()
+
+    def _parse_bool(self, value):
+        """Helper to convert request values to boolean."""
+        if not value:
+            return False
+        return str(value).lower() in ['true', '1', 't', 'y', 'yes', 'on']
 
     def _register_routes(self):
         @self.app.route('/')
@@ -26,15 +32,16 @@ class Manager:
             if not file:
                 return jsonify({"error": "No file uploaded"}), 400
             
-            # Extract parameters from the multipart form data
-            # Defaults match the processor's method signature
+            # PARSING FIX: Convert string form-data to boolean
             person_selector = request.form.get("person_selector", "all")
             hand_side = request.form.get("hand_side", "both")
+            should_render = self._parse_bool(request.form.get("should_render"))
 
             result = self.hamer_processor.process_image_file(
                 file, 
                 person_selector=person_selector, 
-                hand_side=hand_side
+                hand_side=hand_side,
+                should_render=should_render
             )
             return jsonify(result)
         
@@ -44,20 +51,22 @@ class Manager:
             if not file:
                 return jsonify({"error": "No file uploaded"}), 400
             
-            # Extract parameters from the multipart form data
+            # PARSING FIX: Convert string form-data to boolean
             person_selector = request.form.get("person_selector", "all")
             hand_side = request.form.get("hand_side", "both")
-
+            should_render = self._parse_bool(request.form.get("should_render"))
+            
             try:
                 result = self.hamer_processor.process_video_file(
                     file,
                     person_selector=person_selector,
-                    hand_side=hand_side
+                    hand_side=hand_side,
+                    should_render=should_render
                 )
             except Exception as e:
                 import traceback
                 tb_str = traceback.format_exc()
-                print(tb_str)  # Prints full traceback in server logs
+                print(tb_str)
                 return jsonify({"error": str(e), "traceback": tb_str}), 500
             return jsonify(result)
             

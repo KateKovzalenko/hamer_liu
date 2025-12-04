@@ -25,6 +25,24 @@ import hamer
 from .base_processor import BaseProcessor
 from vitpose_model import ViTPoseModel
 
+# New integration: Video Manager
+from .utils.video_mp4_manager import VideoMP4Manager, ColorFormat
+
+import time
+from functools import wraps
+
+def time_execution(label):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start = time.time()
+            result = func(*args, **kwargs)
+            end = time.time()
+            print(f"[{label}] Execution time: {(end - start) * 1000:.2f} ms")
+            return result
+        return wrapper
+    return decorator
+
 # ------------------------------------------------------------------------------
 # 1. Configuration & Constants
 # ------------------------------------------------------------------------------
@@ -179,7 +197,8 @@ class HumanDetector:
             detectron2_cfg.model.roi_heads.box_predictors[i].test_score_thresh = config.box_threshold
             
         self.predictor = DefaultPredictor_Lazy(detectron2_cfg)
-
+    
+    @time_execution("HumanDetector")
     def detect(self, img_cv2: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         out = self.predictor(img_cv2)
         instances = out["instances"]
@@ -255,6 +274,7 @@ class HamerProcessor(BaseProcessor):
         real_idx = sorted_indices[target_idx]
         return bboxes[real_idx:real_idx+1], scores[real_idx:real_idx+1]
 
+    @time_execution("ViTPose")
     def _extract_hands(
         self,
         img_rgb: np.ndarray,
@@ -297,7 +317,8 @@ class HamerProcessor(BaseProcessor):
     # --------------------------------------------------------------------------
     # Logic: Inference Loop
     # --------------------------------------------------------------------------
-
+    
+    @time_execution("HaMeR Inference")
     def _run_hamer(self, img_cv2: np.ndarray, candidates: List[Dict]) -> List[Dict]:
         """Batched HaMeR inference."""
         boxes = np.array([c["hand_bbox"] for c in candidates])
@@ -389,6 +410,7 @@ class HamerProcessor(BaseProcessor):
             
         return serialized_hands
 
+    @time_execution("Rendering")
     def _render_overlay(self, img_cv2: np.ndarray, results: List[Dict]) -> str:
         """Renders scene and returns base64 PNG."""
         if not results: return ""
@@ -495,7 +517,8 @@ class HamerProcessor(BaseProcessor):
         self, 
         file, 
         person_selector: Union[str, int] = "all", 
-        hand_side: str = "both"
+        hand_side: str = "both",
+        should_render: bool = False
     ) -> Dict[str, Any]:
         """
         Process an uploaded image file-like object.
@@ -507,54 +530,62 @@ class HamerProcessor(BaseProcessor):
             if image_np is None:
                 return {"error": "Failed to decode image"}
                 
-            return self._process_frame_logic(image_np, True, person_selector, hand_side)
+            return self._process_frame_logic(image_np, should_render, person_selector, hand_side)
         except Exception as e:
             # Log error in production
             return {"error": f"Processing failure: {str(e)}"}
 
     def process_video_file(
-        self, 
-        file, 
-        person_selector: Union[str, int] = "all", 
-        hand_side: str = "both"
-    ) -> Dict[str, Any]:
-        """
-        Process an uploaded video file-like object.
-        """
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-            tmp.write(file.read())
-            tmp_path = tmp.name
+            self, 
+            file, 
+            person_selector: Union[str, int] = "all", 
+            hand_side: str = "both",
+            sample_rate: int = 1,
+            should_render: bool = False
+        ) -> Dict[str, Any]:
+            """
+            Process an uploaded video file-like object using VideoMP4Manager.
+            """
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+                tmp.write(file.read())
+                tmp_path = tmp.name
 
-        cap = cv2.VideoCapture(tmp_path)
-        results = []
-        frame_idx = 0
-        sample_rate = 100 # Could be parameterized in config
-        
-        try:
-            if not cap.isOpened():
-                return {"error": "Could not open video file"}
+            results = []
+            
+            # logical check to prevent division by zero
+            if sample_rate < 1: 
+                sample_rate = 1
 
-            while True:
-                ret, frame = cap.read()
-                if not ret: break
+            try:
+                # Use VideoMP4Manager for robust frame extraction
+                # We request BGR format as per HamerProcessor requirements (OpenCV standard)
+                video_manager = VideoMP4Manager(tmp_path, color_format=ColorFormat.BGR)
+
+                # Use iterator to stream frames (memory efficient)
+                for frame_idx, frame in enumerate(video_manager):
+                    should_process = (frame_idx % sample_rate == 0)
+
+                    if should_process:
+                        try:
+                            # Frame is already np.ndarray in BGR, directly passable
+                            res = self._process_frame_logic(frame, should_render, person_selector, hand_side)
+                            res["frame_index"] = frame_idx
+                            results.append(res)
+                        except Exception as e:
+                            results.append({"frame": frame_idx, "error": str(e)})
+
+            except Exception as e:
+                return {"error": f"Video processing failed: {str(e)}"}
                 
-                frame_idx += 1
-                should_render = (frame_idx == 1)
-                should_process = (frame_idx == 1) or (frame_idx % sample_rate == 0)
-                
-                if should_process:
+            finally:
+                # Ensure temporary file cleanup
+                if os.path.exists(tmp_path):
                     try:
-                        res = self._process_frame_logic(frame, should_render, person_selector, hand_side)
-                        results.append(res)
-                    except Exception as e:
-                        results.append({"frame": frame_idx, "error": str(e)})
-                        
-        finally:
-            cap.release()
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass # Best effort cleanup
 
-        return {
-            "frames_processed": len(results),
-            "samples": results
-        }
+            return {
+                "frames_processed": len(results),
+                "samples": results
+            }
