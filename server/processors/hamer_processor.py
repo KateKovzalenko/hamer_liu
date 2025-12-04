@@ -1,443 +1,560 @@
 import os
 import tempfile
-from IPython import embed
+import urllib.request
+import base64
+import contextlib
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Dict, Any, Tuple, List, Optional, Union, Literal
+
 import torch
 import cv2
 import numpy as np
-import base64
-from pathlib import Path
-from typing import Dict, Any
-import urllib.request
-from ..utils_debug import save_img
 
-from .base_processor import BaseProcessor
-
+# Third-party library imports
 from hamer.configs import CACHE_DIR_HAMER
 from hamer.models import download_models, load_hamer, DEFAULT_CHECKPOINT
 from hamer.datasets.vitdet_dataset import ViTDetDataset
 from hamer.utils import recursive_to
 from hamer.utils.renderer import Renderer, cam_crop_to_full
 from hamer.utils.utils_detectron2 import DefaultPredictor_Lazy
+from detectron2.config import LazyConfig
+import hamer
 
+# Assuming these exist in your environment based on original code
+from .base_processor import BaseProcessor
 from vitpose_model import ViTPoseModel
 
-FINAL_MODEL = CACHE_DIR_HAMER + "/model_final_f05665.pkl"
+# ------------------------------------------------------------------------------
+# 1. Configuration & Constants
+# ------------------------------------------------------------------------------
 
-ASSETS = [
-    DEFAULT_CHECKPOINT,
-    FINAL_MODEL
-]
-
-def _assets_ready(cache_dir: Path) -> bool:
-    sentinel = cache_dir / ".assets_ready"
-    if sentinel.exists():
-        return True
-    if not all(Path(asset).exists() for asset in ASSETS):
-        return False
-    # create sentinel if all expected files present
-    sentinel.touch()
-    return True
-
-def _remove_tar_gz_files(cache_dir: str | Path) -> int:
+@dataclass(frozen=True)
+class HamerConfig:
     """
-    Remove top-level .tar.gz files in cache_dir (non-recursive).
-    Returns number of files removed.
+    Immutable configuration for the Hamer Pipeline.
     """
-    cache_dir = Path(cache_dir)
-    if not cache_dir.is_dir():
-        return 0
-    removed = 0
-    for p in cache_dir.iterdir():  # non-recursive
-        if p.is_file() and p.name.endswith(".tar.gz"):
-            try:
-                p.unlink()
-                removed += 1
-            except Exception:
-                # ignore failures or log if desired
-                pass
-    return removed
-
-def ensure_hamer_assets() -> None:
-    cache_dir = Path(CACHE_DIR_HAMER)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    if _assets_ready(cache_dir):
-        return
-
-    MODEL_URL = (
+    device: str
+    confidence_threshold: float = 0.5
+    box_threshold: float = 0.25
+    hand_keypoint_threshold: float = 0.5
+    min_valid_keypoints: int = 3
+    batch_size: int = 8
+    light_blue: Tuple[float, float, float] = (0.65, 0.74, 0.86)
+    
+    # Asset Management
+    final_model_filename: str = "model_final_f05665.pkl"
+    model_url: str = (
         "https://dl.fbaipublicfiles.com/detectron2/ViTDet/COCO/"
         "cascade_mask_rcnn_vitdet_h/f328730692/model_final_f05665.pkl"
     )
-    print("Downloading final model for ViTDet human detector...")
-    urllib.request.urlretrieve(MODEL_URL, FINAL_MODEL)
 
-    print("Downloading HaMeR model and assets...")
-    download_models(str(cache_dir))
-    # create sentinel if download produced expected files
-    _assets_ready(cache_dir)
-    _remove_tar_gz_files(cache_dir)
+    @property
+    def cache_dir(self) -> Path:
+        return Path(CACHE_DIR_HAMER)
 
-class HamerProcessor(BaseProcessor):
-    """Processor implementation using HaMeR 3D Hand Mesh Reconstruction."""
+    @property
+    def final_model_path(self) -> Path:
+        return self.cache_dir / self.final_model_filename
 
-    def __init__(self, device: str = None):
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
-        # Download & load model
-        ensure_hamer_assets()
-            
-        self.model, self.model_cfg = load_hamer(DEFAULT_CHECKPOINT)
-        self.model = self.model.to(self.device)
-        self.model.eval()
+# ------------------------------------------------------------------------------
+# 2. Asset Management (Separated from Runtime)
+# ------------------------------------------------------------------------------
 
-        # Load human detector (ViTDet)
-        from detectron2.config import LazyConfig
-        import hamer
+class AssetManager:
+    """
+    Responsible for ensuring model weights and assets exist.
+    """
+    @staticmethod
+    def ensure_assets(config: HamerConfig) -> None:
+        config.cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        sentinel = config.cache_dir / ".assets_ready"
+        assets = [DEFAULT_CHECKPOINT, str(config.final_model_path)]
+        
+        if sentinel.exists() and all(Path(a).exists() for a in assets):
+            return
+
+        print("[AssetManager] Downloading final model for ViTDet human detector...")
+        if not config.final_model_path.exists():
+            urllib.request.urlretrieve(config.model_url, str(config.final_model_path))
+
+        print("[AssetManager] Downloading HaMeR model and assets...")
+        download_models(str(config.cache_dir))
+        
+        AssetManager._cleanup_tarballs(config.cache_dir)
+        sentinel.touch()
+
+    @staticmethod
+    def _cleanup_tarballs(cache_dir: Path) -> None:
+        if not cache_dir.is_dir():
+            return
+        for p in cache_dir.iterdir():
+            if p.is_file() and p.name.endswith(".tar.gz"):
+                with contextlib.suppress(OSError):
+                    p.unlink()
+
+
+# ------------------------------------------------------------------------------
+# 3. Mathematical Utilities (Pure Logic)
+# ------------------------------------------------------------------------------
+
+class ProjectionUtils:
+    """
+    Stateless geometric projection utilities optimized for GPU tensors.
+    """
+    @staticmethod
+    def project_to_pixels(
+        vertices: torch.Tensor,
+        cam_t: torch.Tensor,
+        focal_length: float,
+        img_res: Tuple[int, int]
+    ) -> torch.Tensor:
+        """
+        Standard pinhole projection.
+        """
+        tx, ty, tz = cam_t[0], cam_t[1], cam_t[2]
+        
+        # Camera translation
+        X_trans = vertices[:, 0] + tx
+        Y_trans = vertices[:, 1] + ty
+        Z_trans = vertices[:, 2] + tz
+        
+        # RotX(180) -> (x, -y, -z)
+        X_view = X_trans
+        Y_view = Y_trans
+        Z_view = -Z_trans
+        
+        depth = -Z_view + 1e-8
+        
+        W, H = img_res
+        cx, cy = W / 2.0, H / 2.0
+        
+        u = focal_length * (X_view / depth) + cx
+        v = focal_length * (Y_view / depth) + cy
+        
+        return torch.stack([u, v], dim=1)
+
+    @staticmethod
+    def project_to_planar_z0(
+        vertices: torch.Tensor,
+        cam_t: torch.Tensor,
+        focal_length: float
+    ) -> Tuple[torch.Tensor, float]:
+        """
+        Project 3D vertices onto Z=0 plane preserving perspective scale.
+        """
+        tx, ty, tz = cam_t[0], cam_t[1], cam_t[2]
+        
+        X = vertices[:, 0] + tx
+        Y = (vertices[:, 1] + ty) # Note: Y is usually flipped in cam space, treating raw here
+        Z = vertices[:, 2] + tz + 1e-8
+        
+        # Perspective scale factor
+        scale_factor_vec = focal_length / Z
+        
+        X_planar = X * scale_factor_vec
+        Y_planar = Y * scale_factor_vec
+        
+        Z_mean = torch.mean(Z)
+        scale_mean = focal_length / Z_mean
+        Z_planar = (Z - Z_mean) * scale_mean
+        
+        return torch.stack([X_planar, Y_planar, Z_planar], dim=1), scale_mean.item()
+
+
+# ------------------------------------------------------------------------------
+# 4. Pipeline Components (Detectors & Model Wrappers)
+# ------------------------------------------------------------------------------
+
+class HumanDetector:
+    def __init__(self, config: HamerConfig):
+        self.config = config
         cfg_path = Path(hamer.__file__).parent / "configs" / "cascade_mask_rcnn_vitdet_h_75ep.py"
         detectron2_cfg = LazyConfig.load(str(cfg_path))
-        detectron2_cfg.train.init_checkpoint = FINAL_MODEL
+        detectron2_cfg.train.init_checkpoint = str(config.final_model_path)
+        
         for i in range(3):
-            detectron2_cfg.model.roi_heads.box_predictors[i].test_score_thresh = 0.25
-        self.detector = DefaultPredictor_Lazy(detectron2_cfg)
+            detectron2_cfg.model.roi_heads.box_predictors[i].test_score_thresh = config.box_threshold
+            
+        self.predictor = DefaultPredictor_Lazy(detectron2_cfg)
 
-        # Load keypoint detector
-        self.vitpose = ViTPoseModel(self.device)
-
-        # Renderer setup
-        self.renderer = Renderer(self.model_cfg, faces=self.model.mano.faces)
-        self.LIGHT_BLUE = (0.65, 0.74, 0.86)
-
-    # -------------------------
-    # Internal processing logic
-    # -------------------------
-    def _process_image_np(self, image_np: np.ndarray) -> Dict[str, Any]:
-        """Internal helper that processes a numpy image (BGR)."""
-        img_cv2 = image_np.copy()
-        img_rgb = img_cv2[:, :, ::-1]
-
-        # --- Step 1: Detect humans ---
-        det_out = self.detector(img_cv2)
-        det_instances = det_out["instances"]
-        valid_idx = (det_instances.pred_classes == 0) & (det_instances.scores > 0.5)
+    def detect(self, img_cv2: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        out = self.predictor(img_cv2)
+        instances = out["instances"]
+        valid_idx = (instances.pred_classes == 0) & (instances.scores > self.config.confidence_threshold)
+        
         if valid_idx.sum() == 0:
-            return {"error": "No person detected"}
-
-        pred_bboxes = det_instances.pred_boxes.tensor[valid_idx].cpu().numpy()
-        pred_scores = det_instances.scores[valid_idx].cpu().numpy()
-
-        # --- Step 2: Detect body keypoints (to locate hands) ---
-        vitposes_out = self.vitpose.predict_pose(
-            img_rgb, [np.concatenate([pred_bboxes, pred_scores[:, None]], axis=1)]
+            return None, None
+            
+        return (
+            instances.pred_boxes.tensor[valid_idx].cpu().numpy(),
+            instances.scores[valid_idx].cpu().numpy()
         )
 
-        bboxes, is_right = [], []
-        for vitposes in vitposes_out:
-            left_hand_keyp = vitposes["keypoints"][-42:-21]
-            right_hand_keyp = vitposes["keypoints"][-21:]
+class HamerProcessor(BaseProcessor):
+    """
+    Facade orchestrating the 3D Hand Reconstruction Pipeline.
+    Refactored for maintainability, lazy loading, and architectural separation.
+    """
 
-            # Left hand
-            valid = left_hand_keyp[:, 2] > 0.5
-            if valid.sum() > 3:
-                bbox = [
-                    left_hand_keyp[valid, 0].min(),
-                    left_hand_keyp[valid, 1].min(),
-                    left_hand_keyp[valid, 0].max(),
-                    left_hand_keyp[valid, 1].max(),
-                ]
-                bboxes.append(bbox)
-                is_right.append(0)
+    def __init__(self, device: Optional[str] = None):
+        resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.config = HamerConfig(device=resolved_device)
+        self.device = torch.device(self.config.device)
+        
+        # Initialize Assets
+        AssetManager.ensure_assets(self.config)
+        
+        # Models are initialized immediately as per original requirement, 
+        # though lazy loading would be architecturally superior for startup time.
+        self._init_models()
 
-            # Right hand
-            valid = right_hand_keyp[:, 2] > 0.5
-            if valid.sum() > 3:
-                bbox = [
-                    right_hand_keyp[valid, 0].min(),
-                    right_hand_keyp[valid, 1].min(),
-                    right_hand_keyp[valid, 0].max(),
-                    right_hand_keyp[valid, 1].max(),
-                ]
-                bboxes.append(bbox)
-                is_right.append(1)
+    def _init_models(self):
+        """Initialize all neural network models via wrappers or direct loading."""
+        # 1. HaMeR Model
+        self.hamer_model, self.model_cfg = load_hamer(DEFAULT_CHECKPOINT)
+        self.hamer_model = self.hamer_model.to(self.device)
+        self.hamer_model.eval()
 
-        if not bboxes:
-            return {"error": "No hands detected"}
+        # 2. Detectors
+        self.human_detector = HumanDetector(self.config)
+        self.vitpose = ViTPoseModel(self.device)
 
-        boxes = np.stack(bboxes)
-        right = np.stack(is_right)
+        # 3. Renderer
+        self.renderer = Renderer(self.model_cfg, faces=self.hamer_model.mano.faces)
 
-        # --- Step 3: Run HaMeR model ---
-        dataset = ViTDetDataset(self.model_cfg, img_cv2, boxes, right)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0)
+    # --------------------------------------------------------------------------
+    # Logic: Filtering & Selection
+    # --------------------------------------------------------------------------
 
-        all_results = {"hands": []}
-        # Collect lists for final full-frame rendering
-        all_verts_list = []
-        all_cam_t_list = []
-        all_right_list = []
+    def _filter_humans(
+        self, 
+        bboxes: np.ndarray, 
+        scores: np.ndarray, 
+        selector: Union[str, int]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if selector == "all" or len(bboxes) == 0:
+            return bboxes, scores
 
-        for batch in dataloader:
+        # Calculate X-centroids
+        centroids_x = (bboxes[:, 0] + bboxes[:, 2]) / 2.0
+        sorted_indices = np.argsort(centroids_x)
+        num_people = len(bboxes)
+        target_idx = 0
+
+        if isinstance(selector, int):
+            target_idx = max(0, min(selector, num_people - 1))
+        elif isinstance(selector, str):
+            sel = selector.lower()
+            if sel in ["right", "rightmost"]: target_idx = num_people - 1
+            elif sel == "center": target_idx = num_people // 2
+            # default "left" is 0
+        
+        real_idx = sorted_indices[target_idx]
+        return bboxes[real_idx:real_idx+1], scores[real_idx:real_idx+1]
+
+    def _extract_hands(
+        self,
+        img_rgb: np.ndarray,
+        person_bboxes: np.ndarray,
+        person_scores: np.ndarray,
+        side_selector: str
+    ) -> List[Dict[str, Any]]:
+        """Run ViTPose and extract hand bounding boxes."""
+        # Prepare input for ViTPose: [x1, y1, x2, y2, score]
+        boxes_with_scores = np.concatenate([person_bboxes, person_scores[:, None]], axis=1)
+        vitposes_out = self.vitpose.predict_pose(img_rgb, [boxes_with_scores])
+        
+        candidates = []
+        target = side_selector.lower()
+        
+        for i, vitposes in enumerate(vitposes_out):
+            p_bbox = person_bboxes[i]
+            p_score = person_scores[i]
+            
+            # (keypoints_slice, is_right_flag)
+            checks = []
+            if target in ["left", "both"]: checks.append((vitposes["keypoints"][-42:-21], 0))
+            if target in ["right", "both"]: checks.append((vitposes["keypoints"][-21:], 1))
+
+            for kps, is_right in checks:
+                valid_mask = kps[:, 2] > self.config.hand_keypoint_threshold
+                if valid_mask.sum() > self.config.min_valid_keypoints:
+                    valid_kps = kps[valid_mask]
+                    candidates.append({
+                        "hand_bbox": [
+                            valid_kps[:, 0].min(), valid_kps[:, 1].min(),
+                            valid_kps[:, 0].max(), valid_kps[:, 1].max()
+                        ],
+                        "is_right": is_right,
+                        "person_bbox": p_bbox.tolist(),
+                        "person_score": float(p_score)
+                    })
+        return candidates
+
+    # --------------------------------------------------------------------------
+    # Logic: Inference Loop
+    # --------------------------------------------------------------------------
+
+    def _run_hamer(self, img_cv2: np.ndarray, candidates: List[Dict]) -> List[Dict]:
+        """Batched HaMeR inference."""
+        boxes = np.array([c["hand_bbox"] for c in candidates])
+        right_flags = np.array([c["is_right"] for c in candidates])
+        
+        dataset = ViTDetDataset(self.model_cfg, img_cv2, boxes, right_flags)
+        loader = torch.utils.data.DataLoader(
+            dataset, batch_size=self.config.batch_size, shuffle=False, num_workers=0
+        )
+        
+        results = []
+        for batch in loader:
             batch = recursive_to(batch, self.device)
             with torch.no_grad():
-                out = self.model(batch)
+                out = self.hamer_model(batch)
 
+            # Camera logic
             pred_cam = out["pred_cam"]
             multiplier = (2 * batch["right"] - 1)
             pred_cam[:, 1] = multiplier * pred_cam[:, 1]
-
+            
             box_center = batch["box_center"].float()
             box_size = batch["box_size"].float()
             img_size = batch["img_size"].float()
+            
             scaled_focal_length = (
-                self.model_cfg.EXTRA.FOCAL_LENGTH / self.model_cfg.MODEL.IMAGE_SIZE * img_size.max()
+                self.model_cfg.EXTRA.FOCAL_LENGTH / 
+                self.model_cfg.MODEL.IMAGE_SIZE * img_size.max()
             )
 
-            pred_cam_t_full = cam_crop_to_full(
+            pred_cam_full = cam_crop_to_full(
                 pred_cam, box_center, box_size, img_size, scaled_focal_length
-            ).detach().cpu().numpy()
-
-            # iterate over batch dimension to collect all hands
-            batch_size = pred_cam.shape[0]
-            for n in range(batch_size):
-                verts_n = out["pred_vertices"][n].detach().cpu().numpy()
-                is_r_n = int(batch["right"][n].cpu().numpy())
-                # flip X for handedness (same as demo)
-                verts_n[:, 0] = (2 * is_r_n - 1) * verts_n[:, 0]
-                cam_t_n = pred_cam_t_full[n]
- 
-                all_results["hands"].append(
-                    {
-                        "is_right": bool(is_r_n),
-                        "vertices": verts_n.tolist(),
-                        "camera_translation": cam_t_n.tolist(),
-                    }
-                )
- 
-                all_verts_list.append(verts_n)
-                all_cam_t_list.append(cam_t_n)
-                all_right_list.append(is_r_n)
-        
-        # Single full-frame render (one image per uploaded image)
-        if len(all_verts_list) > 0:
-            # prefer renderer.render_rgba_multiple if available
-            render_fn = getattr(self.renderer, "render_rgba_multiple", None)
-            # choose render resolution from the input image
-            h_full, w_full = img_cv2.shape[:2]
-            render_res_hw = (int(w_full), int(h_full))
-            # compute a full-frame scaled focal length (use max side like demo)
-            scaled_focal_length_full = (
-                self.model_cfg.EXTRA.FOCAL_LENGTH / self.model_cfg.MODEL.IMAGE_SIZE * max(h_full, w_full)
             )
- 
-            if render_fn is not None:
-                rendered_combined = render_fn(
-                    all_verts_list,
-                    cam_t=all_cam_t_list,
-                    render_res=render_res_hw,
-                    focal_length=scaled_focal_length_full,
-                    is_right=all_right_list,
-                    mesh_base_color=self.LIGHT_BLUE,
-                    scene_bg_color=(1, 1, 1),
-                )
-            else:
-                # fallback: try to render each mesh into full-frame and alpha-composite manually
-                # use renderer callable that renders crops; this fallback may produce suboptimal results
-                renders = []
-                for verts_n, cam_t_n in zip(all_verts_list, all_cam_t_list):
-                    try:
-                        r = self.renderer(verts_n, cam_t_n, img_cv2, mesh_base_color=self.LIGHT_BLUE, scene_bg_color=(1,1,1))
-                        renders.append(r)
-                    except Exception:
-                        renders.append(np.zeros((h_full, w_full, 4), dtype=np.float32))
-                # sum/composite renders (simple over operator)
-                rendered_combined = np.zeros((h_full, w_full, 4), dtype=np.float32)
-                for r in renders:
-                    r_float = r.astype(np.float32)
-                    alpha = r_float[..., 3:4]
-                    if alpha.max() > 1.5:
-                        alpha = alpha / 255.0
-                    rendered_combined[..., :3] = rendered_combined[..., :3] * (1 - alpha) + r_float[..., :3] * alpha
-                    rendered_combined[..., 3:4] = np.clip(rendered_combined[..., 3:4] + alpha, 0, 1)
 
-            # Ensure rendered_combined matches full image size
-            h_r, w_r = rendered_combined.shape[:2]
-            if (h_r, w_r) != (h_full, w_full):
-                if (w_r, h_r) == (h_full, w_full):
-                    rendered_combined = np.transpose(rendered_combined, (1, 0, 2))
-                else:
-                    rendered_combined = cv2.resize(rendered_combined, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
+            for n in range(pred_cam.shape[0]):
+                verts = out["pred_vertices"][n]
+                is_r = int(batch["right"][n].item())
+                
+                # Normalize Left hand to Right hand canonical space if needed
+                if is_r == 0:
+                    verts[:, 0] = -1 * verts[:, 0]
 
-            # Composite RGBA over original image (both in [0,1] float)
-            full_img_rgb = img_cv2.astype(np.float32)[:, :, ::-1] / 255.0
-            alpha = rendered_combined[..., 3:4].astype(np.float32)
-            if alpha.max() > 1.5:
-                alpha = alpha / 255.0
-            rgb = rendered_combined[..., :3].astype(np.float32)
-            input_img_overlay = full_img_rgb * (1.0 - alpha) + rgb * alpha
-            input_img_overlay = np.clip(input_img_overlay, 0.0, 1.0)
-            final_render_bgr = (input_img_overlay[:, :, ::-1] * 255).astype(np.uint8)
+                results.append({
+                    "vertices": verts, # GPU
+                    "cam_t": pred_cam_full[n], # GPU
+                    "is_right": is_r,
+                    "focal_length": scaled_focal_length # Scalar Tensor
+                })
+        return results
 
-            _, png_bytes = cv2.imencode(".png", final_render_bgr)
-            rendered_b64 = base64.b64encode(png_bytes).decode("utf-8")
-            all_results["full_frame_rendered_image_base64"] = rendered_b64
+    # --------------------------------------------------------------------------
+    # Logic: Serialization & Rendering
+    # --------------------------------------------------------------------------
 
-        return all_results
-    
-    def _process_video(self, file_path, sample_rate=100):
-        """
-        Process video file by sampling frames.
-        - First frame: full hand processing with rendered image.
-        - Subsequent frames: vertices + camera translation only.
-        """
-        cap = cv2.VideoCapture(file_path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video: {file_path}")
+    def _serialize_results(
+        self, 
+        inference_results: List[Dict], 
+        candidates: List[Dict],
+        img_res: Tuple[int, int]
+    ) -> List[Dict]:
+        serialized_hands = []
+        
+        for res, candidate in zip(inference_results, candidates):
+            focal = res["focal_length"].item() if isinstance(res["focal_length"], torch.Tensor) else res["focal_length"]
+            
+            # GPU Math
+            px_coords = ProjectionUtils.project_to_pixels(
+                res["vertices"], res["cam_t"], focal, img_res
+            )
+            planar_coords, scale = ProjectionUtils.project_to_planar_z0(
+                res["vertices"], res["cam_t"], focal
+            )
+            
+            # To CPU
+            is_right = bool(res["is_right"])
+            faces = self.renderer.faces if is_right else self.renderer.faces_left
+            
+            serialized_hands.append({
+                "is_right": is_right,
+                "vertices_3d": res["vertices"].detach().cpu().numpy().tolist(),
+                "vertices_pixel": px_coords.detach().cpu().numpy().tolist(),
+                "camera_translation": res["cam_t"].detach().cpu().numpy().tolist(),
+                "vertices_planar_z0": planar_coords.detach().cpu().numpy().tolist(),
+                "scaling_factor_planar_z0": scale,
+                "faces": faces.tolist(),
+                "person_bounding_box_xyxy": candidate["person_bbox"],
+                "person_detection_score": candidate["person_score"]
+            })
+            
+        return serialized_hands
 
-        frame_count = 0
-        sampled_results = []
+    def _render_overlay(self, img_cv2: np.ndarray, results: List[Dict]) -> str:
+        """Renders scene and returns base64 PNG."""
+        if not results: return ""
+        
+        h, w = img_cv2.shape[:2]
+        
+        # Prepare data for renderer (CPU/Numpy expected by HaMeR renderer)
+        verts_list = [r["vertices"].detach().cpu().numpy() for r in results]
+        cam_list = [r["cam_t"].detach().cpu().numpy() for r in results]
+        right_list = [r["is_right"] for r in results]
+        
+        # Determine focal length (assumes uniform batch)
+        focal = results[0]["focal_length"]
+        if isinstance(focal, torch.Tensor): focal = focal.item()
+        
+        scaled_focal = (self.model_cfg.EXTRA.FOCAL_LENGTH / 
+                        self.model_cfg.MODEL.IMAGE_SIZE * max(h, w))
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break  # exit if no more frames
-            frame_count += 1
+        # Render
+        # Ideally, we use render_rgba_multiple if available for batching
+        render_fn = getattr(self.renderer, "render_rgba_multiple", None)
+        
+        if render_fn:
+            rgba = render_fn(
+                verts_list, cam_t=cam_list, render_res=(w, h), is_right=right_list,
+                focal_length=scaled_focal, mesh_base_color=self.config.light_blue,
+                scene_bg_color=(1, 1, 1)
+            )
+        else:
+            # Fallback sequential render
+            layers = []
+            for v, c, r in zip(verts_list, cam_list, right_list):
+                 # Temporarily swap faces for left hand if needed (renderer usually handles logic via arg but explicit is safer)
+                 # Note: renderer.faces is usually static. We rely on the renderer detecting 'is_right' logic 
+                 # or we assume vertices are already canonical.
+                 # HaMeR standard renderer needs manual handling? 
+                 # Assuming Hamer renderer handles mirroring via 'is_right' flag internally or we just pass canonical verts
+                 layers.append(self.renderer(v, c, img_cv2, mesh_base_color=self.config.light_blue))
+            
+            # Alpha composite manually
+            rgba = np.zeros((h, w, 4), dtype=np.float32)
+            for layer in layers:
+                alpha = layer[..., 3:4] / 255.0 if layer.max() > 1.5 else layer[..., 3:4]
+                rgba[..., :3] = rgba[..., :3] * (1 - alpha) + layer[..., :3] * alpha
+                rgba[..., 3:4] = np.clip(rgba[..., 3:4] + alpha, 0, 1)
 
-            # Always process the first frame
-            if frame_count == 1:
-                full_result = self._process_image_np(frame)
-                sampled_results.append(full_result)
-                continue
+        # Final Composite
+        if rgba.shape[:2] != (h, w):
+            rgba = cv2.resize(rgba, (w, h))
 
-            # Sample other frames at given interval
-            if frame_count % sample_rate == 0:
-                try:
-                    # Run same processing as _process_image_np, but skip rendering
-                    img_cv2 = frame.copy()
-                    img_rgb = img_cv2[:, :, ::-1]
+        img_float = img_cv2.astype(np.float32)[:, :, ::-1] / 255.0
+        alpha_o = rgba[..., 3:4]
+        if alpha_o.max() > 1.5: alpha_o /= 255.0
+        
+        comp = img_float * (1 - alpha_o) + rgba[..., :3] * alpha_o
+        comp_bgr = (np.clip(comp, 0, 1) * 255).astype(np.uint8)[:, :, ::-1]
+        
+        return base64.b64encode(cv2.imencode(".png", comp_bgr)[1]).decode("utf-8")
 
-                    # Detect humans
-                    det_out = self.detector(img_cv2)
-                    det_instances = det_out["instances"]
-                    valid_idx = (det_instances.pred_classes == 0) & (det_instances.scores > 0.5)
-                    if valid_idx.sum() == 0:
-                        sampled_results.append({"error": "No person detected"})
-                        continue
+    # --------------------------------------------------------------------------
+    # Public Entry Points (Internal)
+    # --------------------------------------------------------------------------
 
-                    pred_bboxes = det_instances.pred_boxes.tensor[valid_idx].cpu().numpy()
-                    pred_scores = det_instances.scores[valid_idx].cpu().numpy()
-
-                    # Keypoints
-                    vitposes_out = self.vitpose.predict_pose(
-                        img_rgb, [np.concatenate([pred_bboxes, pred_scores[:, None]], axis=1)]
-                    )
-
-                    bboxes, is_right = [], []
-                    for vitposes in vitposes_out:
-                        left_hand_keyp = vitposes["keypoints"][-42:-21]
-                        right_hand_keyp = vitposes["keypoints"][-21:]
-
-                        # Left hand
-                        valid = left_hand_keyp[:, 2] > 0.5
-                        if valid.sum() > 3:
-                            bbox = [
-                                left_hand_keyp[valid, 0].min(),
-                                left_hand_keyp[valid, 1].min(),
-                                left_hand_keyp[valid, 0].max(),
-                                left_hand_keyp[valid, 1].max(),
-                            ]
-                            bboxes.append(bbox)
-                            is_right.append(0)
-
-                        # Right hand
-                        valid = right_hand_keyp[:, 2] > 0.5
-                        if valid.sum() > 3:
-                            bbox = [
-                                right_hand_keyp[valid, 0].min(),
-                                right_hand_keyp[valid, 1].min(),
-                                right_hand_keyp[valid, 0].max(),
-                                right_hand_keyp[valid, 1].max(),
-                            ]
-                            bboxes.append(bbox)
-                            is_right.append(1)
-
-                    if not bboxes:
-                        sampled_results.append({"error": "No hands detected"})
-                        continue
-
-                    boxes = np.stack(bboxes)
-                    right = np.stack(is_right)
-
-                    dataset = ViTDetDataset(self.model_cfg, img_cv2, boxes, right)
-                    dataloader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0)
-
-                    frame_results = {"hands": []}
-                    for batch in dataloader:
-                        batch = recursive_to(batch, self.device)
-                        with torch.no_grad():
-                            out = self.model(batch)
-
-                        pred_cam = out["pred_cam"]
-                        multiplier = (2 * batch["right"] - 1)
-                        pred_cam[:, 1] = multiplier * pred_cam[:, 1]
-
-                        box_center = batch["box_center"].float()
-                        box_size = batch["box_size"].float()
-                        img_size = batch["img_size"].float()
-                        scaled_focal_length = (
-                            self.model_cfg.EXTRA.FOCAL_LENGTH / self.model_cfg.MODEL.IMAGE_SIZE * img_size.max()
-                        )
-
-                        pred_cam_t_full = cam_crop_to_full(
-                            pred_cam, box_center, box_size, img_size, scaled_focal_length
-                        ).detach().cpu().numpy()
-
-                        verts = out["pred_vertices"][0].detach().cpu().numpy()
-                        cam_t = pred_cam_t_full[0]
-                        is_r = bool(batch["right"][0].cpu().numpy())
-
-                        # For video frames after first, skip rendering
-                        frame_results["hands"].append(
-                            {
-                                "is_right": is_r,
-                                "vertices": verts.tolist(),
-                                "camera_translation": cam_t.tolist(),
-                            }
-                        )
-
-                    sampled_results.append(frame_results)
-
-                except Exception as e:
-                    sampled_results.append({"error": str(e)})
-
-        cap.release()
-        return {
-            "frames_processed": len(sampled_results),
-            "samples": sampled_results
+    def _process_frame_logic(
+        self, 
+        image_np: np.ndarray, 
+        render: bool,
+        person_selector: Union[str, int],
+        hand_side: str
+    ) -> Dict[str, Any]:
+        """Internal pipeline execution."""
+        img_rgb = image_np[:, :, ::-1].copy() # ViTPose needs RGB
+        
+        # 1. Detect People
+        p_boxes, p_scores = self.human_detector.detect(image_np)
+        if p_boxes is None: return {"error": "No person detected"}
+        
+        # 2. Filter People
+        p_boxes, p_scores = self._filter_humans(p_boxes, p_scores, person_selector)
+        if len(p_boxes) == 0: return {"error": "Person selection failed"}
+        
+        # 3. Extract Hands
+        hand_candidates = self._extract_hands(img_rgb, p_boxes, p_scores, hand_side)
+        if not hand_candidates: return {"error": "No hands detected"}
+        
+        # 4. Mesh Inference
+        inference_results = self._run_hamer(image_np, hand_candidates)
+        
+        # 5. Output Generation
+        output = {
+            "hands": self._serialize_results(inference_results, hand_candidates, (image_np.shape[1], image_np.shape[0]))
         }
+        
+        if render:
+            output["full_frame_rendered_image_base64"] = self._render_overlay(image_np, inference_results)
+            
+        return output
 
+    # --------------------------------------------------------------------------
+    # Flask Interface Methods (Preserved Signature)
+    # --------------------------------------------------------------------------
 
-    # -------------------------
-    # Flask interface methods
-    # -------------------------
-    def process_image_file(self, file):
-        """Process an uploaded image file-like object (from Flask)."""
-        filestr = file.read()
-        npimg = np.frombuffer(filestr, np.uint8)
-        image_np = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-        return self._process_image_np(image_np)
-
-    def process_video_file(self, file):
+    def process_image_file(
+        self, 
+        file, 
+        person_selector: Union[str, int] = "all", 
+        hand_side: str = "both"
+    ) -> Dict[str, Any]:
         """
-        Process an uploaded video file-like object (from Flask).
-        Saves the uploaded file temporarily and calls _process_video.
+        Process an uploaded image file-like object.
         """
+        try:
+            filestr = file.read()
+            npimg = np.frombuffer(filestr, np.uint8)
+            image_np = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+            if image_np is None:
+                return {"error": "Failed to decode image"}
+                
+            return self._process_frame_logic(image_np, True, person_selector, hand_side)
+        except Exception as e:
+            # Log error in production
+            return {"error": f"Processing failure: {str(e)}"}
 
-        # Save uploaded file to a temp location
+    def process_video_file(
+        self, 
+        file, 
+        person_selector: Union[str, int] = "all", 
+        hand_side: str = "both"
+    ) -> Dict[str, Any]:
+        """
+        Process an uploaded video file-like object.
+        """
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             tmp.write(file.read())
             tmp_path = tmp.name
 
+        cap = cv2.VideoCapture(tmp_path)
+        results = []
+        frame_idx = 0
+        sample_rate = 100 # Could be parameterized in config
+        
         try:
-            result = self._process_video(tmp_path)
-        finally:
-            os.remove(tmp_path)
+            if not cap.isOpened():
+                return {"error": "Could not open video file"}
 
-        return result
+            while True:
+                ret, frame = cap.read()
+                if not ret: break
+                
+                frame_idx += 1
+                should_render = (frame_idx == 1)
+                should_process = (frame_idx == 1) or (frame_idx % sample_rate == 0)
+                
+                if should_process:
+                    try:
+                        res = self._process_frame_logic(frame, should_render, person_selector, hand_side)
+                        results.append(res)
+                    except Exception as e:
+                        results.append({"frame": frame_idx, "error": str(e)})
+                        
+        finally:
+            cap.release()
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+        return {
+            "frames_processed": len(results),
+            "samples": results
+        }

@@ -1,111 +1,109 @@
-# HaMeR-LiU: Hand Mesh tracking
+# **HaMeR-LiU: Hand Mesh Tracking**
 
-## Adaption of the HAMER repository.
+## **Adaptation of the HaMeR Repository**
 
-For more information about the original readme.md, refers to the **[Original README.DM](./docs/README_original.md)** file.
+This project functions as a wrapper and adaptation of the original HaMeR repository for hand mesh tracking. For information regarding the underlying logic, refer to the [**Original README**](https://www.google.com/search?q=./docs/README_original.md).
 
-## Docker Installation
+## **1\. System Prerequisites**
 
-This procedure details setting up and running the HaMeR project using Docker and the NVIDIA Container Toolkit. This is the **recommended method** as it provides a reproducible, isolated environment that resolves all complex Python dependency conflicts (e.g., numpy, opencv, xtcocotools).
+The following configuration is required to establish the runtime environment. These instructions are validated for **Windows 11 (Home/Pro)** using an **NVIDIA GPU**.
 
-These instructions are tailored for **Windows 11 (Home/Pro)** with an **NVIDIA GPU**.
+### **Host Configuration**
 
-### 1\. Host System Prerequisites (Windows 11)
+1. **NVIDIA Drivers:** Install the latest [NVIDIA Game Ready or Studio Drivers](https://www.nvidia.com/Download/index.aspx) for your specific GPU (RTX 4070 Ti SUPER or equivalent).  
+2. **WSL 2:** Docker Desktop on Windows requires the Windows Subsystem for Linux (WSL) 2 for GPU passthrough.  
+   * Open PowerShell as Administrator and execute:  
+     wsl \--install
 
-Your host system must be configured to provide GPU access to Docker containers.
+   * Reboot the system if prompted.  
+3. **Docker Desktop:**  
+   * Download and install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop).  
+   * During installation, ensure **"Use WSL 2 based engine"** is selected.  
+   * Post-installation: Navigate to **Settings \> Resources \> WSL Integration** and ensure "Enable integration with my default WSL distro" is active.
 
-**Install NVIDIA Drivers:** Ensure you have the latest NVIDIA Game Ready or Studio Drivers installed for your GPU.
+## **2\. Project & Asset Setup**
 
-**Install/Enable WSL 2:** Docker Desktop on Windows requires the Windows Subsystem for Linux (WSL) 2 for GPU passthrough. Windows 11 Home editions fully support this.
+### **Repository Initialization**
 
-  * Open PowerShell as Administrator and run:
-    ```bash
-    wsl --install
-    ```
-  * Reboot your system if prompted.
+Clone the repository and its submodules. Switch to the active development branch immediately after cloning.
 
-**Install Docker Desktop:**
-
-  * Download and install Docker Desktop for Windows.
-  * During setup, ensure it is configured to use the "WSL 2 based engine." This is the default.
-  * After installation, navigate to **Settings \> Resources \> WSL Integration** and ensure "Enable integration with my default WSL distro" is checked.
-
-
-
-### 2\. Project & Asset Setup
-
-
-**Clone the Repository:** 
-Clone the `hamer` repository, including its submodules (like ViTPose).
-
-```bash
-git clone --recursive https://github.com/KateKovzalenko/hamer_liu
+\# Clone recursive to include ViTPose and other dependencies  
+git clone \--recursive \[https://github.com/KateKovzalenko/hamer\_liu\](https://github.com/KateKovzalenko/hamer\_liu)  
 cd hamer
 
-
-**Download MANO Model:**
-
-The MANO model is required but cannot be redistributed due to its license.
-
-  * Visit the [MANO website](https://mano.is.tue.mpg.de/) and register to access the downloads section.
-  * Download the right hand model (`MANO_RIGHT.pkl`).
-  * Create the required data directory structure and place the file there. The final path on your host machine must be:
-    `hamer/_DATA/data/mano/MANO_RIGHT.pkl`
-
-
-Contains instructions for running the Docker file for hand tracking server, located in the docker folder.  
-
-Future plans:  
-- Add Hamer processing.  
-- After integrating Hamer to hand tracking, remove code related to MediaPipe.
-
-
-# Switch to our temporary development branch
-git fetch origin dev
-git checkout dev
+\# Switch to the development branch  
+git fetch origin dev  
+git checkout dev  
 git pull origin dev
 
-**Build the Docker Image**
+### **MANO Model Acquisition**
 
-	DEV CONTAINER PHASE
-	* Open the files in VisualStudio Code
-	* Press F1 to open search bar
-	* Choose : 'dev container- open folder in container'
-	* in pop-up window choose HaMeR repository file on your device
-	* Notice visible log in terminal of the container being build
-	* Container is build when dev container terminal displays the port
-	
-	PYTHON DEBUG CONSOLE PHASE
-	* Press : Ctrl+Shift+P
-	* Choose: Python: Select interpreter > Python 3.10.112 (venv)
-	* Run using (in options:) Python Debugger : Debug using launch.json
-	* Web app is running when debugger console displays the port 
+The MANO model is proprietary and cannot be redistributed. It must be manually acquired and placed in the correct directory structure to allow the container to mount it.
 
+1. Register and download the model from the [MANO website](https://mano.is.tue.mpg.de/).  
+2. Download the right-hand model: MANO\_RIGHT.pkl.  
+3. Place the file in the following local directory structure within the cloned repository:  
+   hamer/\_DATA/data/mano/MANO\_RIGHT.pkl
 
-### 3\. Test the Application**
+## **3\. Development Environment Setup**
 
-You have two ways to test your running API:
+This project utilizes **VS Code Dev Containers** to create an isolated, reproducible Python environment with resolved dependencies (NumPy, OpenCV, PyTorch, XTCocoTools).
 
-*** Using the Web Browser (GUI) ***
+### **Dev Container Initialization**
 
-1.  Open your favorite web browser (like Chrome, Firefox, or Edge).
-2.  Navigate to the following URL: **[http://localhost:8080](https://www.google.com/search?q=http://localhost:8080)**
-3.  You should see a simple webpage with an "Upload an Image" form.
-4.  Use the form to upload your image to see the JSON results.
-5.  WARNING:
-	if you choose image in video browsing window, it will be treated as single-frame video
-	if you choose video in image browsing window, you will get an error
+1. Open the hamer folder in **Visual Studio Code**.  
+2. Access the Command Palette (F1 or Ctrl+Shift+P).  
+3. Select: **Dev Containers: Reopen in Container**.  
+   * *Note: If prompted, select the definition file located in the .devcontainer directory.*  
+4. The terminal will display build logs. The initialization is complete when the terminal within VS Code becomes interactive and displays the container's shell prompt.
 
-*** Using the Python Client Script ***
+## **4\. Execution & Debugging**
 
-This method provides a visual confirmation by plotting the results on the image.
+Once inside the Dev Container, the Python environment is pre-configured.
 
-1.  **Install Client Dependencies**: In your terminal, install the required Python libraries for the client script.
-    ```powershell
-    pip install requests matplotlib Pillow
-    ```
-2.  **Run the Client**: Execute the `client.py` script.
+### **Launching the Web Server**
 
-    ```powershell
-    python client/client.py --input "path"
-    ```
+1. Open the Command Palette (Ctrl+Shift+P).  
+2. Select: **Python: Select Interpreter**.  
+3. Choose the virtual environment path: Python 3.10.x (venv).  
+4. Navigate to the **Run and Debug** view (Ctrl+Shift+D).  
+5. Select **"Debug using launch.json"** (or the specific configuration name defined in .vscode/launch.json) and press F5.  
+6. The Debug Console will indicate execution. The server is active when the port (default: 8080\) is displayed.
+
+## **5\. Client Usage & Testing**
+
+### **Option A: Web Interface (GUI)**
+
+1. Open a browser on the host machine.  
+2. Navigate to: http://localhost:8080  
+3. Upload an image via the form to view the JSON output.
+
+**WARNING:**
+
+* Do not upload video files via the image selection input (System Error).  
+* Images uploaded via the video selection input will be processed as a single-frame video.
+
+### **Option B: Python Client Script**
+
+This method validates the API programmatically and visualizes the mesh tracking on the input image.
+
+1. Install Client Dependencies (Host Machine):  
+   Open a terminal on your host machine (not the container) and install the visualization requirements:  
+   pip install requests matplotlib Pillow
+
+2. Execute Client:  
+   Run the client script targeting the running local server.  
+   \# Replace "path/to/image.jpg" with your actual file path  
+   python client/client.py \--input "path/to/image.jpg"
+
+## **Architecture Notes & Roadmap**
+
+**Current Status:**
+
+* Docker containerization allows for consistent CUDA runtimes across different host GPU drivers.  
+* MediaPipe integration is currently active.
+
+**Future Roadmap:**
+
+* \[ \] Full HaMeR processing integration.  
+* \[ \] Deprecation of MediaPipe logic following HaMeR stabilization.
